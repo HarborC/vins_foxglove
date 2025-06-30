@@ -154,9 +154,6 @@ void Visualizer::showPointCloud(const std::string &topic_nm, const int64_t &usec
     new_colors.resize(pcd.size(), {0, 255, 0, 255});
   } else {
     new_colors = colors;
-    for (size_t i = 0; i < colors.size(); i++) {
-      new_colors[i].push_back(255);
-    }
   }
 
   fg_msg::PointCloud pc_msg;

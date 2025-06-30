@@ -1,7 +1,6 @@
 syntax = "proto3";
 
 import "foxglove/Pose.proto";
-import "foxglove/Quaternion.proto";
 import "foxglove/Vector3.proto";
 import "google/protobuf/timestamp.proto";
 

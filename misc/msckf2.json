@@ -1,0 +1,332 @@
+{
+  "configById": {
+    "Plot!20rr1rw": {
+      "paths": [
+        {
+          "timestampMethod": "receiveTime",
+          "value": "raw_imu.acceleration.x",
+          "enabled": true,
+          "color": "#4e98e2"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "raw_imu.acceleration.y",
+          "enabled": true,
+          "color": "#f5774d"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "raw_imu.acceleration.z",
+          "enabled": true,
+          "color": "#f7df71"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "raw_imu.angular_velocity.x",
+          "enabled": true,
+          "color": "#5cd6a9"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "raw_imu.angular_velocity.y",
+          "enabled": true,
+          "color": "#61cbff"
+        },
+        {
+          "timestampMethod": "receiveTime",
+          "value": "raw_imu.angular_velocity.z",
+          "enabled": true,
+          "color": "#a395e2"
+        }
+      ],
+      "showXAxisLabels": true,
+      "showYAxisLabels": true,
+      "showLegend": false,
+      "legendDisplay": "floating",
+      "showPlotValuesInLegend": false,
+      "isSynced": true,
+      "xAxisVal": "timestamp",
+      "sidebarDimension": 240,
+      "foxglovePanelTitle": "IMU原始信息"
+    },
+    "3D!rxdk70": {
+      "cameraState": {
+        "distance": 1.7948966386168215,
+        "perspective": true,
+        "phi": 64.1498559077829,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "thetaOffset": 46.03746397694847,
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "scene": {
+        "transforms": {
+          "labelSize": 0.07
+        }
+      },
+      "transforms": {
+        "frame:IMU": {
+          "visible": false
+        },
+        "frame:CAM_0": {
+          "visible": false
+        },
+        "frame:CAM_1": {
+          "visible": false
+        },
+        "frame:STEREO": {
+          "visible": false
+        },
+        "frame:LOCAL_WORLD": {
+          "visible": false
+        }
+      },
+      "topics": {},
+      "layers": {
+        "grid": {
+          "visible": true,
+          "frameLocked": true,
+          "label": "Grid",
+          "instanceId": "d3ca0eb4-27fc-409f-9a88-433a96cf03d4",
+          "layerId": "foxglove.Grid",
+          "size": 10,
+          "divisions": 10,
+          "lineWidth": 1,
+          "color": "#248eff",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "imageMode": {},
+      "foxglovePanelTitle": "九轴IMU姿态"
+    },
+    "Image!1idnesu": {
+      "cameraState": {
+        "distance": 20,
+        "perspective": true,
+        "phi": 60,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0,
+          0,
+          0
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "thetaOffset": 45,
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "scene": {},
+      "transforms": {},
+      "topics": {},
+      "layers": {},
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "imageMode": {
+        "imageTopic": "track_images"
+      },
+      "foxglovePanelTitle": "SLAM算法状态"
+    },
+    "3D!12p3s8a": {
+      "cameraState": {
+        "distance": 2.570243131298223,
+        "perspective": true,
+        "phi": 53.68234968655502,
+        "target": [
+          0,
+          0,
+          0
+        ],
+        "targetOffset": [
+          0.2895143555027569,
+          -0.10653912448939105,
+          -4.601645523463635e-17
+        ],
+        "targetOrientation": [
+          0,
+          0,
+          0,
+          1
+        ],
+        "thetaOffset": 156.776299759643,
+        "fovy": 45,
+        "near": 0.5,
+        "far": 5000
+      },
+      "followMode": "follow-pose",
+      "scene": {
+        "transforms": {
+          "labelSize": 0.3,
+          "axisScale": 0.232
+        },
+        "labelScaleFactor": 0.05
+      },
+      "transforms": {
+        "frame:CAM_1": {
+          "visible": true
+        },
+        "frame:LOCAL_WORLD": {
+          "visible": false
+        },
+        "frame:IMU_R": {
+          "visible": false
+        },
+        "frame:CAM_0": {
+          "visible": true
+        },
+        "frame:left_camera": {
+          "visible": true
+        },
+        "frame:STEREO": {
+          "visible": false
+        }
+      },
+      "topics": {
+        "left_image": {
+          "visible": true,
+          "cameraInfoTopic": "intrinsics_0",
+          "distance": 0.2
+        },
+        "right_image": {
+          "visible": true,
+          "cameraInfoTopic": "intrinsics_1",
+          "distance": 0.2
+        },
+        "intrinsics_1": {
+          "visible": true,
+          "distance": 0.2
+        },
+        "intrinsics_0": {
+          "visible": true,
+          "distance": 0.2
+        },
+        "points_msckf": {
+          "visible": true,
+          "colorField": "z",
+          "colorMode": "rgba-fields",
+          "colorMap": "turbo",
+          "pointSize": 10
+        },
+        "points_slam": {
+          "visible": true,
+          "colorField": "z",
+          "colorMode": "rgba-fields",
+          "colorMap": "turbo",
+          "pointSize": 10
+        },
+        "path_imu": {
+          "visible": true,
+          "type": "line",
+          "lineWidth": 0.02
+        }
+      },
+      "layers": {
+        "grid": {
+          "visible": true,
+          "frameLocked": true,
+          "label": "Grid",
+          "instanceId": "be0b94d5-1d3c-4eaf-808c-cbfc036292d7",
+          "layerId": "foxglove.Grid",
+          "size": 5,
+          "divisions": 10,
+          "lineWidth": 1,
+          "color": "#248eff",
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            0,
+            0,
+            0
+          ]
+        }
+      },
+      "publish": {
+        "type": "point",
+        "poseTopic": "/move_base_simple/goal",
+        "pointTopic": "/clicked_point",
+        "poseEstimateTopic": "/initialpose",
+        "poseEstimateXDeviation": 0.5,
+        "poseEstimateYDeviation": 0.5,
+        "poseEstimateThetaDeviation": 0.26179939
+      },
+      "imageMode": {},
+      "foxglovePanelTitle": "预测轨迹图"
+    }
+  },
+  "globalVariables": {},
+  "userNodes": {},
+  "playbackConfig": {
+    "speed": 1
+  },
+  "layout": {
+    "first": {
+      "first": {
+        "first": "Plot!20rr1rw",
+        "second": "3D!rxdk70",
+        "direction": "row",
+        "splitPercentage": 57.931062318372625
+      },
+      "second": "Image!1idnesu",
+      "direction": "row",
+      "splitPercentage": 49.03225806451613
+    },
+    "second": "3D!12p3s8a",
+    "direction": "column",
+    "splitPercentage": 36.51252408477842
+  }
+}

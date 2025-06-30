@@ -1,7 +1,6 @@
 #include "FGVisualizer.h"
 
 #include "core/VioManager.h"
-#include "serial/imu_serial.h"
 #include "sim/Simulator.h"
 #include "state/Propagator.h"
 #include "state/State.h"
@@ -526,39 +525,6 @@ void FGVisualizer::run() {
   cam_thread.detach();
 
   retrieveIMU();
-
-  // while (1) {
-  //   double timestamp_imu_inC = new_imu_timestamp - _app->get_state()->_calib_dt_CAMtoIMU->value()(0);
-  //   if (!camera_queue.empty() && camera_queue.at(0).timestamp < timestamp_imu_inC) {
-  //     ov_core::CameraData image;
-  //     {
-  //       std::lock_guard<std::mutex> lock(camera_queue_mtx);
-  //       image = camera_queue.front();
-  //       camera_queue.pop_front();
-  //     }
-
-  //     auto rT0_1 = boost::posix_time::microsec_clock::local_time();
-  //     double update_dt = 100.0 * (timestamp_imu_inC - image.timestamp);
-
-  //     last_images_timestamp = image.timestamp;
-  //     last_images = image.images;
-
-  //     _app->feed_measurement_camera(image);
-      
-  //     auto rT0_2 = boost::posix_time::microsec_clock::local_time();
-
-  //     publish_cameras();
-  //     visualize();
-  //     auto rT0_3 = boost::posix_time::microsec_clock::local_time();
-  //     double time_slam = (rT0_2 - rT0_1).total_microseconds() * 1e-6;
-  //     double time_total = (rT0_3 - rT0_1).total_microseconds() * 1e-6;
-  //     PRINT_INFO(BLUE "[TIME]: %.4f seconds total, %.4f seconds slam (%.1f hz, %.2f ms behind)\n" RESET, time_total, time_slam, 1.0 / time_total, update_dt);
-  //     print_memory_usage();
-  //   } else {
-  //     usleep(1); // Sleep for 10us if queue is empty
-  //   }
-  // }
-
 }
 
 void FGVisualizer::visualize() {
@@ -567,8 +533,6 @@ void FGVisualizer::visualize() {
     return;
   last_visualization_timestamp = _app->get_state()->_timestamp;
 
-  // // publish current image (only if not multi-threaded)
-  // if (!_app->get_params().use_multi_threading_pubs)
   publish_images();
 
   // Return if we have not inited
@@ -618,55 +582,41 @@ void FGVisualizer::publish_features() {
 
   // Get our good MSCKF features
   std::vector<Eigen::Vector3d> feats_msckf = _app->get_good_features_MSCKF();
-  pcl::PointCloud<pcl::PointXYZRGBA> cloud;
-  for (auto &feat : feats_msckf) {
-    pcl::PointXYZRGBA point;
-    point.x = feat.x();
-    point.y = feat.y();
-    point.z = feat.z();
-    point.r = 0;
-    point.g = 255;
-    point.b = 0;
-    point.a = 255;
-    cloud.push_back(point);
+  std::vector<std::vector<float>> feats_msckf_pcd;
+  std::vector<std::vector<uint8_t>> feats_msckf_color;
+  for (const auto &feat : feats_msckf) {
+    std::vector<float> pcd = {feat.x(), feat.y(), feat.z()};
+    std::vector<uint8_t> color = {0, 255, 0, 255};
+    feats_msckf_pcd.push_back(pcd);
+    feats_msckf_color.push_back(color);
   }
   
-  _viz->showPointCloudRGBA("points_msckf", time_us, cloud, "LOCAL_WORLD");
+  _viz->showPointCloud("points_msckf", time_us, feats_msckf_pcd, feats_msckf_color, "LOCAL_WORLD");
 
   // Get our good SLAM features
   std::vector<Eigen::Vector3d> feats_slam = _app->get_features_SLAM();
-  pcl::PointCloud<pcl::PointXYZRGBA> cloud_SLAM;
+  std::vector<std::vector<float>> feats_slam_pcd;
+  std::vector<std::vector<uint8_t>> feats_slam_color;
   for (auto &feat : feats_slam) {
-    pcl::PointXYZRGBA point;
-    point.x = feat.x();
-    point.y = feat.y();
-    point.z = feat.z();
-    point.r = 255;
-    point.g = 0;
-    point.b = 0;
-    point.a = 255;
-    cloud_SLAM.push_back(point);
+    std::vector<float> pcd = {feat.x(), feat.y(), feat.z()};
+    std::vector<uint8_t> color = {0, 255, 0, 255};
+    feats_slam_pcd.push_back(pcd);
+    feats_slam_color.push_back(color);
   }
-  _viz->showPointCloudRGBA("points_slam", time_us, cloud_SLAM, "LOCAL_WORLD");
+  _viz->showPointCloud("points_slam", time_us, feats_slam_pcd, feats_slam_color, "LOCAL_WORLD");
 
 
   // Get our good ARUCO features
   std::vector<Eigen::Vector3d> feats_aruco = _app->get_features_ARUCO();
-  pcl::PointCloud<pcl::PointXYZRGBA> cloud_ARUCO;
+  std::vector<std::vector<float>> feats_aruco_pcd;
+  std::vector<std::vector<uint8_t>> feats_aruco_color;
   for (auto &feat : feats_aruco) {
-    pcl::PointXYZRGBA point;
-    point.x = feat.x();
-    point.y = feat.y();
-    point.z = feat.z();
-    point.r = 0;
-    point.g = 0;
-    point.b = 255;
-    point.a = 255;
-    cloud_ARUCO.push_back(point);
+    std::vector<float> pcd = {feat.x(), feat.y(), feat.z()};
+    std::vector<uint8_t> color = {0, 255, 0, 255};
+    feats_aruco_pcd.push_back(pcd);
+    feats_aruco_color.push_back(color);
   }
-  _viz->showPointCloudRGBA("points_aruco", time_us, cloud_ARUCO, "LOCAL_WORLD");
-
-  // Get our good SIMULATION features
+  _viz->showPointCloud("points_aruco", time_us, feats_aruco_pcd, feats_aruco_color, "LOCAL_WORLD");
 }
 
 

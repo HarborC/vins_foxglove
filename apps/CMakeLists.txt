@@ -1,5 +1,6 @@
 add_executable(run_msckf run_msckf.cpp)
 target_link_libraries(run_msckf ${PROJECT_NAME} ${thirdparty_libraries})
+target_compile_definitions(run_msckf PRIVATE PROJ_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../")
 
 install(TARGETS run_msckf
     ARCHIVE DESTINATION lib
@@ -9,6 +10,8 @@ install(TARGETS run_msckf
 
 add_executable(record_data record_data.cpp)
 target_link_libraries(record_data ${PROJECT_NAME} ${thirdparty_libraries})
+target_compile_definitions(run_msckf PRIVATE PROJ_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../")
+
 install(TARGETS record_data
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
