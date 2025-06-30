@@ -3,8 +3,6 @@
 #include "google/protobuf/util/time_util.h"
 
 #include <opencv2/core.hpp>
-#include <pcl/point_cloud.h>
-#include <pcl/point_types.h>
 
 #include "foxglove/FrameTransform.pb.h"
 #include "foxglove/PosesInFrame.pb.h"
@@ -53,17 +51,10 @@ inline void SetColor(const std::array<float, 4>& rgba, ::foxglove::Color* out) {
 }
 
 template <typename ValT>
-void SetPoint(const Eigen::Matrix<ValT, 3, 1>& pt, ::foxglove::Point3* out) {
-  out->set_x(pt.x());
-  out->set_y(pt.y());
-  out->set_z(pt.z());
-}
-
-template <typename PointT>
-void SetPoint(const PointT& pt, ::foxglove::Point3* out) {
-  out->set_x(pt.x());
-  out->set_y(pt.y());
-  out->set_z(pt.z());
+void SetPoint(const std::vector<ValT>& pt, ::foxglove::Point3* out) {
+  out->set_x(pt[0]);
+  out->set_y(pt[1]);
+  out->set_z(pt[2]);
 }
 
 std::string CompressAsStr(const cv::Mat& img, const std::string& fmt);
@@ -74,26 +65,7 @@ bool SetImgMsg(const cv::Mat& img, ::foxglove::RawImage* msg);
 
 void SetPointCloudMsgProperties(::foxglove::PointCloud* pc_msg, bool no_color = false);
 
-template <typename PointT>
-inline float getPtElem(const PointT& pt, const size_t idx) {
-  if (idx == 0) {
-    return pt.x;
-  } else if (idx == 1) {
-    return pt.y;
-  } else if (idx == 2) {
-    return pt.z;
-  }
-}
-template <>
-inline float getPtElem<Eigen::Vector3f>(const Eigen::Vector3f& pt, const size_t idx) {
-  return pt(static_cast<int>(idx));
-}
-
-bool AddColorPointsToMsg(const pcl::PointCloud<pcl::PointXYZRGBA>& raw_pc, const size_t skip_n,
-                         ::foxglove::PointCloud* pc_msg, const int new_a = -1);
-
-template <typename PointContainerT>
-bool AddPointsToMsg(const PointContainerT& raw_pc, const size_t skip_n,
+bool AddPointsToMsg(const std::vector<std::vector<float>>& raw_pc, const size_t skip_n,
                     const std::vector<std::vector<uint8_t>>& colors,
                     ::foxglove::PointCloud* pc_msg) {
   if (pc_msg->point_stride() != 16 && pc_msg->point_stride() != 12) {
@@ -127,11 +99,11 @@ bool AddPointsToMsg(const PointContainerT& raw_pc, const size_t skip_n,
       break;
     }
     const auto& pt_i = raw_pc.at(pi);
-    cp_float_to_msg_data(getPtElem(pt_i, 0), offset_i);
+    cp_float_to_msg_data(pt_i[0], offset_i);
     offset_i += 4;
-    cp_float_to_msg_data(getPtElem(pt_i, 1), offset_i);
+    cp_float_to_msg_data(pt_i[1], offset_i);
     offset_i += 4;
-    cp_float_to_msg_data(getPtElem(pt_i, 2), offset_i);
+    cp_float_to_msg_data(pt_i[2], offset_i);
     offset_i += 4;
 
     if (!use_color) {
@@ -146,8 +118,7 @@ bool AddPointsToMsg(const PointContainerT& raw_pc, const size_t skip_n,
   return true;
 }
 
-template <typename PointContainerT>
-void addPointsToLine(const PointContainerT& points, ::foxglove::LinePrimitive* line) {
+void addPointsToLine(const std::vector<std::vector<float>>& points, ::foxglove::LinePrimitive* line) {
   for (const auto& pt : points) {
     foxglove_viz::foxglove::utility::SetPoint(pt, line->add_points());
   }

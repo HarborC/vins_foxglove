@@ -1,0 +1,54 @@
+message(STATUS "MANUALLY LINKING TO OV_CORE LIBRARY....")
+file(GLOB_RECURSE OVCORE_LIBRARY_SOURCES "${CMAKE_SOURCE_DIR}/ov_core/*.cpp")
+list(APPEND LIBRARY_SOURCES ${OVCORE_LIBRARY_SOURCES})
+include_directories(${CMAKE_SOURCE_DIR}/ov_core/)
+
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/ov_core/
+        DESTINATION include/${PROJECT_NAME}
+        FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
+)
+
+file(GLOB_RECURSE OVINIT_LIBRARY_SOURCES "${CMAKE_SOURCE_DIR}/ov_init/*.cpp")
+list(APPEND LIBRARY_SOURCES ${OVINIT_LIBRARY_SOURCES})
+include_directories(${CMAKE_SOURCE_DIR}/ov_init/)
+
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/ov_init/
+        DESTINATION include/${PROJECT_NAME}
+        FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
+)
+
+file(GLOB_RECURSE OVMSCKF_LIBRARY_SOURCES "${CMAKE_SOURCE_DIR}/ov_msckf/*.cpp")
+list(APPEND LIBRARY_SOURCES ${OVMSCKF_LIBRARY_SOURCES})
+include_directories(${CMAKE_SOURCE_DIR}/ov_msckf/)
+
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/ov_msckf/
+        DESTINATION include/${PROJECT_NAME}
+        FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
+)
+
+add_library(${PROJECT_NAME} SHARED ${LIBRARY_SOURCES})
+target_link_libraries(${PROJECT_NAME} ${thirdparty_libraries} foxglove_lib)
+target_include_directories(${PROJECT_NAME} PUBLIC 
+  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/ov_core>
+  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/ov_init>
+  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/ov_msckf>
+  $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
+)
+
+install(TARGETS ${PROJECT_NAME}
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION bin
+)
+
+install(TARGETS ${PROJECT_NAME}
+        EXPORT ${PROJECT_NAME}-targets
+        ARCHIVE DESTINATION lib
+        LIBRARY DESTINATION lib
+        RUNTIME DESTINATION bin
+        )
+
+install(EXPORT ${PROJECT_NAME}-targets
+        FILE ${PROJECT_NAME}-config.cmake
+        DESTINATION share/cmake/${PROJECT_NAME}/
+     )
