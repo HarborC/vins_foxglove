@@ -9,3 +9,6 @@ doxgen_generated
 doc
 .vscode
 install
+thirdparty/kalibrlib
+calib_data
+debug_data

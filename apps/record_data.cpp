@@ -47,7 +47,7 @@ foxglove_viz::Visualizer::Ptr viz; // 可视化工具指针
 std::deque<ov_core::CameraData> camera_queue; // 相机数据队列
 std::mutex camera_queue_mtx; // 互斥锁
 
-std::string root_dir = "/home/cat/projects/data/"; // 数据根目录
+std::string root_dir = std::string(PROJ_DIR) + "/calib_data/";
 
 // 视频缓冲区结构
 struct Buffer {
@@ -294,7 +294,7 @@ void retrieveCamera() {
                 camera_queue.push_back(image_msg);
             }
 
-            print_memory_usage();
+            // print_memory_usage();
         } else {
             cerr << "图像解码失败或尺寸错误" << endl;
         }
@@ -312,18 +312,25 @@ void retrieveCamera() {
 
 // 主函数
 int main(int argc, char **argv) {
-    bool is_record_camera = false;
+    int is_record_camera = 0;
     if (argc > 1) {
-        is_record_camera = true;
+        is_record_camera = atoi(argv[1]);
     }
 
     // 创建时间戳目录
-    std::time_t t = std::time(nullptr);
-    std::tm tm = *std::localtime(&t);
-    std::ostringstream oss;
-    oss << std::put_time(&tm, "%Y%m%d_%H%M%S");
-    std::string timestamp_str = oss.str();
-    root_dir += "/" + timestamp_str + "/";
+    if (is_record_camera == 0) {
+        root_dir += "/imu_calib/";
+    } else if (is_record_camera == 1) {
+        root_dir += "/camera_calib/";
+    } else if (is_record_camera == 2) {
+        root_dir += "/camera_imu_calib/";
+    } else {
+        std::cout << "Invalid argument" << std::endl;
+        return -1;
+    }
+
+    if (fs::exists(root_dir)) 
+        fs::remove_all(root_dir);
     fs::create_directories(root_dir);
 
     // 初始化可视化器
