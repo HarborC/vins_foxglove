@@ -39,15 +39,25 @@ namespace fs = std::filesystem;
 #include "utils/sensor_data.h"
 #include "utils/memory_utils.h"
 #include "foxglove/FGVisualizer.h"
+#include "calibration/apriltags.h"
+#include "calibration/aprilgrid.h" 
+#include "calibration/frame_quality_evaluator.h"
 
 using namespace std;
+using namespace cv;
 
 // 全局变量定义
 foxglove_viz::Visualizer::Ptr viz; // 可视化工具指针
 std::deque<ov_core::CameraData> camera_queue; // 相机数据队列
 std::mutex camera_queue_mtx; // 互斥锁
+std::atomic<bool> thread_update_running = false;
+int is_record_camera = 0;
+std::shared_ptr<CAMERA_CALIB::AprilGrid> april_grid;
+std::shared_ptr<FrameQualityEvaluator> dqe_left;
+std::shared_ptr<FrameQualityEvaluator> dqe_right;
 
 std::string root_dir = std::string(PROJ_DIR) + "/calib_data/";
+std::string left_images_dir, right_images_dir;
 
 // 视频缓冲区结构
 struct Buffer {
@@ -188,6 +198,56 @@ void retrieveIMU() {
     imu_file.close();
 }
 
+void stereoCalibDataGet(const ov_core::CameraData& image_msg) {
+    const int numTags = april_grid->getTagCols() * april_grid->getTagRows();
+    CAMERA_CALIB::ApriltagDetector ad(numTags);
+
+    CAMERA_CALIB::CalibCornerData ccd_good_left;
+    CAMERA_CALIB::CalibCornerData ccd_bad_left;
+    ad.detectTags(image_msg.images[0], ccd_good_left.corners, ccd_good_left.corner_ids, ccd_good_left.radii,
+                    ccd_bad_left.corners, ccd_bad_left.corner_ids, ccd_bad_left.radii);
+
+    vector<Point2f> current_corners_left;
+    for (int i_p = 0; i_p < ccd_good_left.corner_ids.size(); i_p++) {
+        const Eigen::Vector2d& pt = ccd_good_left.corners[i_p];
+        current_corners_left.emplace_back(pt.x(), pt.y());
+    }
+
+    bool isFrameAcceptable_left = dqe_left->isFrameAcceptable(image_msg.images[0], current_corners_left);
+
+    CAMERA_CALIB::CalibCornerData ccd_good_right;
+    CAMERA_CALIB::CalibCornerData ccd_bad_right;
+    ad.detectTags(image_msg.images[1], ccd_good_right.corners, ccd_good_right.corner_ids, ccd_good_right.radii,
+                    ccd_bad_right.corners, ccd_bad_right.corner_ids, ccd_bad_right.radii);
+
+    vector<Point2f> current_corners_right;
+    for (int i_p = 0; i_p < ccd_good_right.corner_ids.size(); i_p++) {
+        const Eigen::Vector2d& pt = ccd_good_right.corners[i_p];
+        current_corners_right.emplace_back(pt.x(), pt.y());
+    }
+
+    bool isFrameAcceptable_right = dqe_right->isFrameAcceptable(image_msg.images[1], current_corners_right);
+
+    if (isFrameAcceptable_left || isFrameAcceptable_right) {
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(6) << image_msg.timestamp;
+        std::string timestamp_str = oss.str();
+
+        std::string left_path = left_images_dir + "/" + timestamp_str + ".png";
+        std::string right_path = right_images_dir + "/" + timestamp_str + ".png";
+
+        cv::imwrite(left_path, image_msg.images[0]);
+        cv::imwrite(right_path, image_msg.images[1]);
+    }
+
+    cv::Mat image_combined;
+    cv::hconcat(dqe_left->global_coverage_.viz_mat, dqe_right->global_coverage_.viz_mat, image_combined);
+    int64_t time_us = (image_msg.timestamp * 1e6);
+    viz->showImage("track_images", time_us, image_combined, "track_images", true);
+
+    thread_update_running = false;
+}
+
 // 采集相机图像数据
 void retrieveCamera() {
     std::string left_images_dir = root_dir + "/images/left/";
@@ -247,14 +307,6 @@ void retrieveCamera() {
     clock_gettime(CLOCK_MONOTONIC, &ts_mono);
     double offset = (ts_realtime.tv_sec + ts_realtime.tv_nsec / 1e9) - (ts_mono.tv_sec + ts_mono.tv_nsec / 1e9);
 
-    ov_core::CameraData image_msg;
-    image_msg.sensor_ids.push_back(0);
-    image_msg.sensor_ids.push_back(1);
-    cv::Mat mask = cv::Mat::zeros(cv::Size(WIDTH / 2, HEIGHT), CV_8UC1);
-    image_msg.masks.push_back(mask);
-    image_msg.masks.push_back(mask);
-    image_msg.images.resize(2);
-
     // 图像采集循环
     while (true) {
         v4l2_buffer buf = {};
@@ -271,36 +323,49 @@ void retrieveCamera() {
         cv::Mat full = cv::imdecode(data, cv::IMREAD_COLOR);
 
         if (!full.empty() && full.cols == WIDTH && full.rows == HEIGHT) {
+            ov_core::CameraData image_msg;
+            image_msg.images.resize(2);
             image_msg.timestamp = utc_time;
             image_msg.images[0] = full(cv::Rect(0, 0, WIDTH / 2, HEIGHT)).clone();
             image_msg.images[1] = full(cv::Rect(WIDTH / 2, 0, WIDTH / 2, HEIGHT)).clone();
 
-            cv::Mat gray_left, gray_right;
-            cv::cvtColor(image_msg.images[0], gray_left, cv::COLOR_BGR2GRAY);
-            cv::cvtColor(image_msg.images[1], gray_right, cv::COLOR_BGR2GRAY);
+            cv::cvtColor(image_msg.images[0], image_msg.images[0], cv::COLOR_BGR2GRAY);
+            cv::cvtColor(image_msg.images[1], image_msg.images[1], cv::COLOR_BGR2GRAY);
 
-            std::ostringstream oss;
-            oss << std::fixed << std::setprecision(6) << utc_time;
-            std::string timestamp_str = oss.str();
+            if (is_record_camera == 2) {
+                std::ostringstream oss;
+                oss << std::fixed << std::setprecision(6) << utc_time;
+                std::string timestamp_str = oss.str();
 
-            std::string left_path = left_images_dir + "/" + timestamp_str + ".png";
-            std::string right_path = right_images_dir + "/" + timestamp_str + ".png";
+                std::string left_path = left_images_dir + "/" + timestamp_str + ".png";
+                std::string right_path = right_images_dir + "/" + timestamp_str + ".png";
 
-            cv::imwrite(left_path, gray_left);
-            cv::imwrite(right_path, gray_right);
+                cv::imwrite(left_path, image_msg.images[0]);
+                cv::imwrite(right_path, image_msg.images[1]);
 
-            {
-                std::lock_guard<std::mutex> lock(camera_queue_mtx);
-                camera_queue.push_back(image_msg);
+                {
+                    std::lock_guard<std::mutex> lock(camera_queue_mtx);
+                    camera_queue.push_back(image_msg);
+                }
+            }
+            
+            // print_memory_usage();
+            ioctl(fd, VIDIOC_QBUF, &buf); // 重新排队该缓冲区
+            usleep(10); // 微小延迟
+
+            if (is_record_camera == 1) {
+                if (thread_update_running)
+                    continue;
+                thread_update_running = true;
+                std::thread thread_update(&stereoCalibDataGet, image_msg);
+                thread_update.detach();
             }
 
-            // print_memory_usage();
         } else {
             cerr << "图像解码失败或尺寸错误" << endl;
+            ioctl(fd, VIDIOC_QBUF, &buf); // 重新排队该缓冲区
+            usleep(10); // 微小延迟
         }
-
-        ioctl(fd, VIDIOC_QBUF, &buf); // 重新排队该缓冲区
-        usleep(10); // 微小延迟
     }
 
     ioctl(fd, VIDIOC_STREAMOFF, &type);
@@ -310,9 +375,10 @@ void retrieveCamera() {
     close(fd);
 }
 
+
+
 // 主函数
 int main(int argc, char **argv) {
-    int is_record_camera = 0;
     if (argc > 1) {
         is_record_camera = atoi(argv[1]);
     }
@@ -336,34 +402,43 @@ int main(int argc, char **argv) {
     // 初始化可视化器
     viz = std::make_shared<foxglove_viz::Visualizer>(8088, 2);
 
-    // 启动相机线程（可选）
-    if (is_record_camera) {
-        std::thread cam_thread(&retrieveCamera);
-        cam_thread.detach();
-        std::cout << "Camera thread started." << std::endl;
-    }
-
     // 启动 IMU 线程
     std::thread imu_thread(&retrieveIMU);
     imu_thread.detach();
     std::cout << "IMU thread started." << std::endl;
 
-    // 主循环：从相机队列中取图并显示
-    while (1)
-    {
-        if (!camera_queue.empty()) {
-            ov_core::CameraData image;
-            {
-                std::lock_guard<std::mutex> lock(camera_queue_mtx);
-                image = camera_queue.front();
-                camera_queue.pop_front();
-            }
+    // 启动相机线程（可选）
+    if (is_record_camera) {
+        if (is_record_camera == 1) {
+            april_grid = std::make_shared<CAMERA_CALIB::AprilGrid>(std::string(PROJ_DIR) + "/thirdparty/kalibrlib/apps/others/aprilgrid.yaml");
+            dqe_left = std::make_shared<FrameQualityEvaluator>();
+            dqe_right = std::make_shared<FrameQualityEvaluator>();
+        }
 
-            int64_t time_us = (image.timestamp * 1e6);
-            viz->showImage("left_image", time_us, image.images[0], "left_camera", true);
-            viz->showImage("right_image", time_us, image.images[1], "right_camera", true);
-        } else {
-            usleep(10); // 队列为空时休眠
+        std::thread cam_thread(&retrieveCamera);
+        cam_thread.detach();
+        std::cout << "Camera thread started." << std::endl;
+
+        if (is_record_camera == 2) {
+            // 主循环：从相机队列中取图并显示
+            while (1)
+            {
+                if (!camera_queue.empty()) {
+                    ov_core::CameraData image;
+                    {
+                        std::lock_guard<std::mutex> lock(camera_queue_mtx);
+                        image = camera_queue.front();
+                        camera_queue.pop_front();
+                    }
+
+                    cv::Mat image_combined;
+                    cv::hconcat(image.images[0], image.images[1], image_combined);
+                    int64_t time_us = (image.timestamp * 1e6);
+                    viz->showImage("track_images", time_us, image_combined, "track_images", true);
+                } else {
+                    usleep(10); // 队列为空时休眠
+                }
+            }
         }
     }
 

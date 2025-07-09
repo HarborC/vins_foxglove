@@ -32,7 +32,7 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ov_msckf/
 )
 
 add_library(${PROJECT_NAME} SHARED ${LIBRARY_SOURCES})
-target_link_libraries(${PROJECT_NAME} ${thirdparty_libraries} foxglove_lib)
+target_link_libraries(${PROJECT_NAME} ${thirdparty_libraries} foxglove_lib apriltag ethz_apriltag2)
 target_include_directories(${PROJECT_NAME} PUBLIC 
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ov_core>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ov_init>
