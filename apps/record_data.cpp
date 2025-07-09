@@ -199,6 +199,7 @@ void retrieveIMU() {
 }
 
 void stereoCalibDataGet(const ov_core::CameraData& image_msg) {
+    static int image_num = 0;
     const int numTags = april_grid->getTagCols() * april_grid->getTagRows();
     CAMERA_CALIB::ApriltagDetector ad(numTags);
 
@@ -213,9 +214,7 @@ void stereoCalibDataGet(const ov_core::CameraData& image_msg) {
         current_corners_left.emplace_back(pt.x(), pt.y());
     }
 
-    std::cout << "current_corners_left.size() = " << current_corners_left.size() << std::endl;
     bool isFrameAcceptable_left = dqe_left->isFrameAcceptable(image_msg.images[0], current_corners_left);
-    std::cout << "isFrameAcceptable_left = " << isFrameAcceptable_left << std::endl;
 
     CAMERA_CALIB::CalibCornerData ccd_good_right;
     CAMERA_CALIB::CalibCornerData ccd_bad_right;
@@ -240,10 +239,22 @@ void stereoCalibDataGet(const ov_core::CameraData& image_msg) {
 
         cv::imwrite(left_path, image_msg.images[0]);
         cv::imwrite(right_path, image_msg.images[1]);
+        image_num++;
     }
 
     cv::Mat image_combined;
     cv::hconcat(dqe_left->global_coverage_.viz_mat, dqe_right->global_coverage_.viz_mat, image_combined);
+    // 图像中间用一条线分割
+    cv::line(image_combined, cv::Point(image_combined.cols / 2, 0), cv::Point(image_combined.cols / 2, image_combined.rows), cv::Scalar(255, 255, 255), 2);
+    // 图片下方黑框显示各种状态
+    cv::line(image_combined, cv::Point(0, image_combined.rows - 50), cv::Point(image_combined.cols, image_combined.rows - 50), cv::Scalar(0, 0, 0), 2);
+    cv::Mat status_image = cv::Mat::zeros(cv::Size(image_combined.cols, 50), CV_8UC3);
+    std::stringstream ss;
+    ss << std::fixed << std::setprecision(2);
+    ss << "Image Num: " << image_num << " " << " | Left Coverage Ratio: " << dqe_left->calcCoverageRatio() << " " << " | Right Coverage Ratio: " << dqe_right->calcCoverageRatio();
+    cv::putText(status_image, ss.str(), cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(255, 255, 255), 2);
+    cv::vconcat(image_combined, status_image, image_combined);
+    
     int64_t time_us = (image_msg.timestamp * 1e6);
     viz->showImage("dete_images", time_us, image_combined, "dete_images", true);
 

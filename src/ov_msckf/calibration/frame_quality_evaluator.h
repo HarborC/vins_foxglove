@@ -11,6 +11,8 @@ public:
         std::vector<std::vector<int>> coverage;  // 每个网格的覆盖状态
         cv::Mat viz_mat;
 
+        int min_grid_num_ = 4;
+
         std::vector<float> getHistogramOfCorners(const std::vector<cv::Point2f>& corners) const;
         void add(const std::vector<cv::Point2f>& corners);
         void initialize(const cv::Mat& img, int window_num);
@@ -41,8 +43,8 @@ public:
     void initialize(const cv::Mat& img);
 
     // 多尺度配置
-    int min_corners_num_ = 12;
-    double similarity_threshold_ = 0.75;
+    int min_corners_num_ = 20;
+    double similarity_threshold_ = 0.5;
 
     // 历史记录
     DGrid global_coverage_;

@@ -26,7 +26,7 @@ bool FrameQualityEvaluator::isFrameAcceptable(const cv::Mat& image, const std::v
 
 void FrameQualityEvaluator::initialize(const cv::Mat& img) {
     global_coverage_.initialize(img, 10);
-    local_coverage_.initialize(img, 20);
+    local_coverage_.initialize(img, 15);
 }
 
 double FrameQualityEvaluator::calcCoverageRatio() const {
@@ -138,7 +138,7 @@ double FrameQualityEvaluator::DGrid::calcCoverageRatio() const {
     double sum_num = 0;
     for (int i = 0; i < coverage.size(); i++) {
         for (int j = 0; j < coverage[0].size(); j++) {
-            if (coverage[i][j] > 0) {
+            if (coverage[i][j] > min_grid_num_) {
                 sum_num++;
             }
         }
