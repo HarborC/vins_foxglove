@@ -213,7 +213,9 @@ void stereoCalibDataGet(const ov_core::CameraData& image_msg) {
         current_corners_left.emplace_back(pt.x(), pt.y());
     }
 
+    std::cout << "current_corners_left.size() = " << current_corners_left.size() << std::endl;
     bool isFrameAcceptable_left = dqe_left->isFrameAcceptable(image_msg.images[0], current_corners_left);
+    std::cout << "isFrameAcceptable_left = " << isFrameAcceptable_left << std::endl;
 
     CAMERA_CALIB::CalibCornerData ccd_good_right;
     CAMERA_CALIB::CalibCornerData ccd_bad_right;
@@ -243,15 +245,15 @@ void stereoCalibDataGet(const ov_core::CameraData& image_msg) {
     cv::Mat image_combined;
     cv::hconcat(dqe_left->global_coverage_.viz_mat, dqe_right->global_coverage_.viz_mat, image_combined);
     int64_t time_us = (image_msg.timestamp * 1e6);
-    viz->showImage("track_images", time_us, image_combined, "track_images", true);
+    viz->showImage("dete_images", time_us, image_combined, "dete_images", true);
 
     thread_update_running = false;
 }
 
 // 采集相机图像数据
 void retrieveCamera() {
-    std::string left_images_dir = root_dir + "/images/left/";
-    std::string right_images_dir = root_dir + "/images/right/";
+    left_images_dir = root_dir + "/images/left/";
+    right_images_dir = root_dir + "/images/right/";
 
     fs::create_directories(left_images_dir);
     fs::create_directories(right_images_dir);
@@ -342,13 +344,13 @@ void retrieveCamera() {
 
                 cv::imwrite(left_path, image_msg.images[0]);
                 cv::imwrite(right_path, image_msg.images[1]);
-
-                {
-                    std::lock_guard<std::mutex> lock(camera_queue_mtx);
-                    camera_queue.push_back(image_msg);
-                }
             }
             
+            {
+                std::lock_guard<std::mutex> lock(camera_queue_mtx);
+                camera_queue.push_back(image_msg);
+            }
+
             // print_memory_usage();
             ioctl(fd, VIDIOC_QBUF, &buf); // 重新排队该缓冲区
             usleep(10); // 微小延迟
@@ -419,7 +421,7 @@ int main(int argc, char **argv) {
         cam_thread.detach();
         std::cout << "Camera thread started." << std::endl;
 
-        if (is_record_camera == 2) {
+        // if (is_record_camera == 2) {
             // 主循环：从相机队列中取图并显示
             while (1)
             {
@@ -439,7 +441,11 @@ int main(int argc, char **argv) {
                     usleep(10); // 队列为空时休眠
                 }
             }
-        }
+        // } else {
+        //     while(1) {
+        //         usleep(10);
+        //     }
+        // }
     }
 
     return 0;
