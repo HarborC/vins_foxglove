@@ -588,6 +588,18 @@ void FGVisualizer::visualize_odometry(double timestamp) {
   T_w_i.block(0, 0, 3, 3) = Eigen::Quaternionf(state_plus(3), state_plus(0), state_plus(1), state_plus(2)).toRotationMatrix();
   T_w_i.block(0, 3, 3, 1) = Eigen::Vector3f(state_plus(4), state_plus(5), state_plus(6));
 
+  /***************************************六自由度数据输出（异步队列）start*************************************/
+  Eigen::Vector3f pos = T_w_i.block<3,1>(0, 3);
+  Eigen::Vector3f euler = T_w_i.block<3,3>(0, 0).eulerAngles(0, 1, 2); // RPY
+  Pose6DFrame f;
+  f.data = {pos[0], pos[1], pos[2], euler[0], euler[1], euler[2]};
+  f.timestamp = timestamp;
+  {
+    std::lock_guard<std::mutex> lk(pose_mtx_);
+    pose_queue_.push_back(std::move(f));
+  }
+  pose_cv_.notify_one();
+  /***************************************六自由度数据输出（异步队列）end*************************************/
 
   poses_imu_odom.push_back({timestamp, T_w_i});
 
@@ -599,19 +611,25 @@ void FGVisualizer::visualize_odometry(double timestamp) {
     poses_imu_odom.pop_front();
   }
 
-  // —— 生成路径（窗口内），可选下采样以限制点数 —— 
   std::vector<Eigen::Matrix4f> path_imu;
   path_imu.reserve(poses_imu_odom.size());
 
-  // 将点数限制到 ~16384（与原逻辑一致）
-  const size_t max_pts = 16384;
+  const size_t max_pts = 200;
   const size_t N = poses_imu_odom.size();
-  const size_t stride = (N > max_pts) ? (N / max_pts + ((N % max_pts) ? 1 : 0)) : 1;
 
-  size_t idx = 0;
-  for (const auto& ps : poses_imu_odom) {
-    if ((idx++ % stride) == 0) {
+  if (N <= max_pts) {
+    path_imu.reserve(N);
+    for (const auto& ps : poses_imu_odom) {
       path_imu.push_back(ps.second);
+    }
+  } else {
+    const size_t stride = (N + max_pts - 1) / max_pts;
+    path_imu.reserve(max_pts);
+    
+    // 直接按索引采样，避免遍历全部元素
+    for (size_t i = 0; i < max_pts && (i * stride) < N; ++i) {
+      const size_t idx = i * stride;
+      path_imu.push_back(poses_imu_odom[idx].second);  // O(1) 随机访问
     }
   }
 
@@ -658,6 +676,12 @@ void FGVisualizer::stopDrivers() {
     imu_cv_.notify_all();
     if (consumer_thread_.joinable()) consumer_thread_.join();
   }
+  // 停止姿态线程
+  if (pose_thread_running_) {
+    pose_thread_running_ = false;
+    pose_cv_.notify_all();
+    if (pose_thread_.joinable()) pose_thread_.join();
+  }
   // 停止驱动
   if (imu_driver_) { imu_driver_->stop(); imu_driver_.reset(); }
   if (cam_driver_) { cam_driver_->stop(); cam_driver_.reset(); }
@@ -676,9 +700,51 @@ static int openPoseSerial(const std::string &dev){
   return fd;
 }
 
+void FGVisualizer::startPoseThread() {
+  if (pose_thread_running_) return;
+  pose_thread_running_ = true;
+  pose_thread_ = std::thread([&]{
+    // 打开串口一次
+    if (!pose_serial_open_) {
+      pose_serial_fd_ = openPoseSerial(pose_serial_device_);
+      pose_serial_open_ = pose_serial_fd_ >= 0;
+      if (!pose_serial_open_) {
+        PRINT_ERROR("Pose serial open failed: %s\n", pose_serial_device_.c_str());
+      } else {
+        PRINT_INFO("Pose serial opened: %s\n", pose_serial_device_.c_str());
+      }
+    }
+    // 发送主循环
+    while (pose_thread_running_) {
+      Pose6DFrame item;
+      {
+        std::unique_lock<std::mutex> lk(pose_mtx_);
+        pose_cv_.wait(lk, [&]{ return !pose_thread_running_ || !pose_queue_.empty(); });
+        if (!pose_thread_running_) break;
+        if (pose_queue_.empty()) continue;
+        item = std::move(pose_queue_.front());
+        pose_queue_.pop_front();
+      }
+
+      if (!pose_serial_open_ || pose_serial_fd_ < 0) continue;
+
+      std::vector<uint8_t> frame;
+      frame.reserve(2 + item.data.size()*sizeof(float) + 1);
+      frame.push_back(0xAA);
+      frame.push_back(0x55);
+      uint8_t* data_ptr = reinterpret_cast<uint8_t*>(item.data.data());
+      frame.insert(frame.end(), data_ptr, data_ptr + item.data.size()*sizeof(float));
+      frame.push_back(0x0D);
+      ssize_t written = ::write(pose_serial_fd_, frame.data(), frame.size());
+      (void)written;
+    }
+  });
+}
+
 void FGVisualizer::run() {
   startCameraDriver();
   startIMUDriver();
+  startPoseThread();
   while (true) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
@@ -723,40 +789,6 @@ void FGVisualizer::publish_state() {
   poseIinM.block(0, 3, 3, 1) = state->_imu->pos();
   Eigen::Matrix4f poseIinM_f = poseIinM.cast<float>();
 
-  /***************************************六自由度数据输出start*************************************/
-  Eigen::Vector3f pos = state->_imu->pos().cast<float>();
-  Eigen::Quaternionf q_IinM_f(q_IinM.cast<float>());
-  Eigen::Vector3f euler = q_IinM_f.toRotationMatrix().eulerAngles(0, 1, 2); // RPY
-  
-  std::array<float, 6> pose6d = {
-    pos[0], pos[1], pos[2],   // x,y,z
-    euler[0], euler[1], euler[2] // roll,pitch,yaw
-  };
-  
-  // ========== 打开串口5 (/dev/ttyS5) ==========
-  if (!pose_serial_open_) {
-    pose_serial_fd_ = openPoseSerial(pose_serial_device_);
-    pose_serial_open_ = pose_serial_fd_>=0;
-  }
-  int fd = pose_serial_fd_;
-  if (fd>=0) {
-    std::vector<uint8_t> frame;
-    frame.push_back(0xAA);
-    frame.push_back(0x55);
-
-    uint8_t* data_ptr = reinterpret_cast<uint8_t*>(pose6d.data());
-    frame.insert(frame.end(), data_ptr, data_ptr + pose6d.size() * sizeof(float));
-
-    frame.push_back(0x0D);
-
-    // ========== 发送数据 ==========
-    ssize_t written = ::write(fd, frame.data(), frame.size());
-    (void)written;
-  }
-  /***************************************六自由度数据输出end*************************************/
-  
-  poses_imu.push_back(std::pair<double, Eigen::Matrix4f>(timestamp_inI, poseIinM_f));
-
   _viz->showPose("pose_imu", time_us, poseIinM_f, "LOCAL_WORLD", "IMU");
 
   poses_imu_dq.push_back(std::pair<double, Eigen::Matrix4f>(timestamp_inI, poseIinM_f));
@@ -767,29 +799,29 @@ void FGVisualizer::publish_state() {
     poses_imu_dq.pop_front();
   }
 
-  // —— 生成路径（窗口内），可选下采样以限制点数 —— 
   std::vector<Eigen::Matrix4f> path_imu;
   path_imu.reserve(poses_imu_dq.size());
 
-  // 将点数限制到 ~16384（与原逻辑一致）
-  const size_t max_pts = 16384;
+  const size_t max_pts = 200;
   const size_t N = poses_imu_dq.size();
-  const size_t stride = (N > max_pts) ? (N / max_pts + ((N % max_pts) ? 1 : 0)) : 1;
 
-  size_t idx = 0;
-  for (const auto& ps : poses_imu_dq) {
-    if ((idx++ % stride) == 0) {
+  if (N <= max_pts) {
+    path_imu.reserve(N);
+    for (const auto& ps : poses_imu_dq) {
       path_imu.push_back(ps.second);
+    }
+  } else {
+    const size_t stride = (N + max_pts - 1) / max_pts;
+    path_imu.reserve(max_pts);
+    
+    // 直接按索引采样，避免遍历全部元素
+    for (size_t i = 0; i < max_pts && (i * stride) < N; ++i) {
+      const size_t idx = i * stride;
+      path_imu.push_back(poses_imu_dq[idx].second);  // O(1) 随机访问
     }
   }
 
   _viz->showPath("path_imu_win10", time_us, path_imu, "LOCAL_WORLD");
-
-  std::vector<Eigen::Matrix4f> path_imu2;
-  for (size_t i = 0; i < poses_imu.size(); i += std::floor((double)poses_imu.size() / 16384.0) + 1) {
-    path_imu2.push_back(poses_imu.at(i).second);
-  }
-  _viz->showPath("path_imu", time_us, path_imu2, "LOCAL_WORLD");
 }
 
 void FGVisualizer::publish_features() {

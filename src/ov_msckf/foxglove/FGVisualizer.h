@@ -7,6 +7,8 @@
 #include <memory>
 #include <mutex>
 #include <deque>
+#include <condition_variable>
+#include <array>
 
 // 第三方库
 #include <Eigen/Eigen>
@@ -157,6 +159,21 @@ public:
   // 姿态串口
   int pose_serial_fd_ = -1;
   bool pose_serial_open_ = false;
+
+  // ========= 六自由度姿态异步发送线程（队列版，确保每帧发送） =========
+  struct Pose6DFrame {
+    std::array<float,6> data{}; // x,y,z,roll,pitch,yaw
+    double timestamp{0.0};
+  };
+  std::deque<Pose6DFrame> pose_queue_;
+  std::mutex pose_mtx_;
+  std::condition_variable pose_cv_;
+  std::atomic<bool> pose_thread_running_{false};
+  std::thread pose_thread_;
+  size_t pose_queue_max_ = 2048; // 极端情况下的上限，避免无限增长
+
+  // 启动 / 停止 姿态发送线程
+  void startPoseThread();
 };
 
 } // namespace ov_msckf
