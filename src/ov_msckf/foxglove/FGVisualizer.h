@@ -15,6 +15,8 @@
 #include <foxglove/visualizer.h>
 
 #include "foxglove/dash_board.h"  // 可视化仪表板模块
+#include "serial_imu/IImuDriver.h"   // IMU 驱动接口
+#include "camera_v4l2/ICameraDriver.h" // 相机驱动接口
 
 // ========== 命名空间定义 ==========
 
@@ -23,44 +25,11 @@ class YamlParser;         // 配置文件解析器
 struct CameraData;        // 相机数据结构
 }
 
-namespace IMUSerial {
-
-// IMU 数据结构定义
-struct IMUDATA {
-  double time;                  // 时间戳（暂未使用）
-  Eigen::Vector3f a;            // 加速度
-  Eigen::Vector3f w;            // 角速度
-  Eigen::Vector3f angle;        // 欧拉角（roll, pitch, yaw）
-  Eigen::Vector3f h;            // 地磁传感器
-
-  // 各类数据的时间戳
-  double timestamp_acc = 0;
-  double timestamp_gyro = 0;
-  double timestamp_ang = 0;
-  double timestamp_h = 0;
-
-  // 标记是否接收到该类数据
-  bool has_acc = false;
-  bool has_gyro = false;
-  bool has_ang = false;
-  bool has_h = false;
-};
-
-// 将欧拉角转换为旋转矩阵的函数声明
-Eigen::Matrix3f rpy2R(const Eigen::Vector3f& rpy);
-} // namespace IMUSerial
-
 namespace ov_msckf {
 
 // 前置声明
 class VioManager;
 class Simulator;
-
-// mmap 视频帧缓冲区结构
-struct Buffer {
-  void* start;
-  size_t length;
-};
 
 // 可视化主类定义
 class FGVisualizer {
@@ -73,6 +42,14 @@ public:
 
   // 启动 IMU 数据采集线程
   void retrieveIMU();
+  // 使用独立驱动后的启动接口（向后兼容）
+  void startIMUDriver();
+  void startCameraDriver();
+  void stopDrivers();
+  void setDevicesAndLatency(const std::string &imu_dev,
+                            const std::string &cam_dev,
+                            const std::string &pose_dev,
+                            double cam_latency);
 
   // 启动相机图像采集线程
   void retrieveCamera();
@@ -187,6 +164,31 @@ public:
 
   // 是否为调试模式（控制是否保存图像/IMU）
   bool is_debug = false;
+
+  // 新增：相机驱动指针（最小实现）
+  std::shared_ptr<ov_sensors::ICameraDriver> cam_driver_;
+
+  // 新增：独立IMU驱动指针（最小实现）
+  std::shared_ptr<class ov_sensors::IImuDriver> imu_driver_;
+  std::shared_ptr<std::ofstream> imu_log_file_;
+
+  // ========= 新增配置与状态 =========
+  std::string imu_device_ = "/dev/ttyS3";
+  std::string cam_device_ = "/dev/video73";
+  std::string pose_serial_device_ = "/dev/ttyS5";
+  double cam_fixed_latency_ = 0.030; // 默认 30ms
+
+  // IMU 时间（camera 时基下）
+  std::mutex imu_time_mtx_;
+  double last_imu_timestamp_inC_ = -1.0;
+  bool imu_new_flag_ = false;
+  std::condition_variable imu_cv_;
+  std::thread consumer_thread_;
+  std::atomic<bool> running_{false};
+
+  // 姿态串口
+  int pose_serial_fd_ = -1;
+  bool pose_serial_open_ = false;
 };
 
 } // namespace ov_msckf

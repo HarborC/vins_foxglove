@@ -26,6 +26,18 @@ file(GLOB_RECURSE OVMSCKF_LIBRARY_SOURCES
 list(APPEND LIBRARY_SOURCES ${OVMSCKF_LIBRARY_SOURCES})
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ov_msckf/)
 
+# ==== Serial IMU sensor module (new) ====
+file(GLOB_RECURSE OVSENSORS_LIBRARY_SOURCES
+        "${CMAKE_CURRENT_SOURCE_DIR}/ov_sensors/**/*.cpp"
+)
+list(APPEND LIBRARY_SOURCES ${OVSENSORS_LIBRARY_SOURCES})
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/ov_sensors/)
+
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ov_sensors/
+                DESTINATION include/${PROJECT_NAME}
+                FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
+)
+
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/ov_msckf/
         DESTINATION include/${PROJECT_NAME}
         FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp"
@@ -37,6 +49,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ov_core>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ov_init>
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ov_msckf>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ov_sensors>
   $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
 )
 

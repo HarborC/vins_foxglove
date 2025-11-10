@@ -18,9 +18,9 @@ cd ${BASE_DIR}
 # rm -rf build
 mkdir -p build && cd build
 clear
-# cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="../install" .. 
-# ninja -j2
+cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="../install" .. 
+ninja -j2
 # sudo ninja install
-cmake  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="../install" ..
-make -j2
-sudo make install
+# cmake  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="../install" ..
+# make -j2
+# sudo make install

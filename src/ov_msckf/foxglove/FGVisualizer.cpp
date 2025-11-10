@@ -35,6 +35,9 @@
 #include <signal.h>
 #include <librealsense2/rs.hpp>
 
+#include "serial_imu/ImuDriver.h"
+#include "camera_v4l2/V4L2CameraDriver.h"
+
 using namespace ov_core;
 using namespace ov_type;
 using namespace ov_msckf;
@@ -70,7 +73,7 @@ Eigen::Matrix3f rpy2R(const Eigen::Vector3f& rpy) {
 }
 
 FGVisualizer::FGVisualizer(std::shared_ptr<VioManager> app, std::shared_ptr<Simulator> sim)
-    : _app(app), _sim(sim), thread_update_running(false) {
+  : _app(app), _sim(sim), thread_update_running(false) {
 
   create_debug_dir();
     
@@ -470,211 +473,122 @@ void FGVisualizer::visualize_final() {
   PRINT_INFO(REDPURPLE "TIME: %.3f seconds\n\n" RESET, (rT2 - rT1).total_microseconds() * 1e-6);
 }
 
-inline double now_mono_raw() {
-  timespec ts;
-  clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
-  return ts.tv_sec + ts.tv_nsec * 1e-9;
+void FGVisualizer::setDevicesAndLatency(const std::string &imu_dev,
+                                        const std::string &cam_dev,
+                                        const std::string &pose_dev,
+                                        double cam_latency){
+  imu_device_ = imu_dev;
+  cam_device_ = cam_dev;
+  pose_serial_device_ = pose_dev;
+  cam_fixed_latency_ = cam_latency;
 }
 
-void FGVisualizer::retrieveIMU() {
-  // 配置
-  const std::string serial_device = "/dev/ttyS3";
-  const double G = 9.81;
-  // 串口帧格式与波特率（用于估算分包传输时间）
-  constexpr double BAUD = 230400.0;
-  constexpr double BITS_PER_BYTE = 10.0;    // 1起始 + 8数据 + 1停止
-  constexpr double BYTES_PER_SUBPKT = 11.0; // 你的协议每小包11字节
-  constexpr double T_packet = (BITS_PER_BYTE * BYTES_PER_SUBPKT) / BAUD; // ≈0.000478s
-  constexpr double T_tx = 4.0 * T_packet;   // 四个分包合计 ≈1.9ms
-  // 固定延迟缓冲（把端到端延迟“变长”→“常数”）
-  constexpr double CAM_FIXED_LATENCY = 0.030; // 30ms，可按抖动调到 0.03~0.05
+void FGVisualizer::retrieveIMU() { startIMUDriver(); }
+
+void FGVisualizer::startIMUDriver() {
+  using namespace ov_sensors;
+  if (imu_driver_) return; // guard
+  // 固定延迟已参数化 cam_fixed_latency_
 
   // 调试输出
-  std::ofstream imu_file(debug_dir + "/imu_data.txt", std::ios::app);
-  imu_file << "# timestamp,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z,qw,qx,qy,qz,mag_x,mag_y,mag_z\n";
-  auto writeIMUFrameCSV = [&](const ov_core::ImuData &msg) {
-    Eigen::Quaterniond q(msg.Rm);
-    imu_file << std::fixed << std::setprecision(6) << msg.timestamp << ","
-             << msg.am(0) << "," << msg.am(1) << "," << msg.am(2) << ","
-             << msg.wm(0) << "," << msg.wm(1) << "," << msg.wm(2) << ","
-             << q.w() << "," << q.x() << "," << q.y() << "," << q.z() << ","
-             << msg.hm(0) << "," << msg.hm(1) << "," << msg.hm(2) << "\n";
-    imu_file.flush();
-  };
-
-  // 打开串口
-  int fd = open(serial_device.c_str(), O_RDWR | O_NOCTTY);
-  if (fd == -1) { perror("open serial"); return; }
-
-  PRINT_INFO("open %s success!\n", serial_device.c_str());
-  if (isatty(STDIN_FILENO) == 0)
-    PRINT_INFO("standard input is not a terminal device\n");
-  else
-    PRINT_INFO("isatty success!\n");
-
-  // 串口参数
-  struct termios tty{}, oldtio;
-  if (tcgetattr(fd, &oldtio) != 0) { perror("tcgetattr"); close(fd); return; }
-  memset(&tty, 0, sizeof(tty));
-  
-  tty.c_cflag |= CLOCAL | CREAD;
-  tty.c_cflag &= ~CSIZE;
-  tty.c_cflag |= CS8;
-  tty.c_cflag &= ~PARENB;
-
-  tty.c_cflag &= ~CRTSCTS;
-
-  tty.c_iflag &= ~ICRNL;
-
-  cfsetispeed(&tty, B230400);
-  cfsetospeed(&tty, B230400);
-  tty.c_cflag &= ~CSTOPB;
-
-  // 关键：一次至少读够一个分包（11字节），降低抖动；超时100ms
-  tty.c_cc[VTIME] = 1;
-  tty.c_cc[VMIN]  = 11;
-
-  tcflush(fd, TCIFLUSH);
-
-  if (tcsetattr(fd, TCSANOW, &tty) != 0) { perror("tcsetattr"); close(fd); return; }
-
-  // 接收缓冲
-  unsigned char chrBuf[100];
-  unsigned char chrCnt = 0; // 关键：必须初始化
-  char r_buf[1024]; memset(r_buf, 0, sizeof(r_buf));
-
-  IMUSerial::IMUDATA current_imu; // 你已有该结构：含 a/w/angle/h 与 has_* 标志位
-
-  while (true) {
-    int ret = read(fd, r_buf, sizeof(r_buf));
-    if (ret <= 0) { printf("uart read failed\n"); break; }
-
-    for (int i = 0; i < ret; i++) {
-      chrBuf[chrCnt++] = static_cast<unsigned char>(r_buf[i]);
-      if (chrCnt < 11) continue;
-
-      // 帧头对齐（保留你原来的判定逻辑）
-      if ((chrBuf[0] != 0x55) || ((chrBuf[1] & 0x50) != 0x50)) {
-        memmove(&chrBuf[0], &chrBuf[1], 10);
-        chrCnt--;
-        continue;
-      }
-
-      // 解析一个11字节小包
-      signed short sData[4];
-      memcpy(&sData[0], &chrBuf[2], 8);
-
-      switch (chrBuf[1]) {
-        case 0x51: { // 加速度
-          for (int j = 0; j < 3; j++)
-            current_imu.a(j) = (float)sData[j] / 32768.0f * 16.0f * (float)G; // m/s^2
-          current_imu.has_acc = true;
-        } break;
-        case 0x52: { // 角速度（dps）
-          for (int j = 0; j < 3; j++)
-            current_imu.w(j) = (float)sData[j] / 32768.0f * 2000.0f; // dps
-          current_imu.has_gyro = true;
-        } break;
-        case 0x53: { // 欧拉角（deg）
-          for (int j = 0; j < 3; j++)
-            current_imu.angle(j) = (float)sData[j] / 32768.0f * 180.0f;
-          current_imu.has_ang = true;
-        } break;
-        case 0x54: { // 磁力计（原始）
-          for (int j = 0; j < 3; j++)
-            current_imu.h(j) = (float)sData[j];
-          current_imu.has_h = true;
-        } break;
-        default: break;
-      }
-      chrCnt = 0;
-
-      // 四个分包到齐 → 组一帧 IMU
-      if (current_imu.has_acc && current_imu.has_gyro && current_imu.has_ang && current_imu.has_h) {
-        // 用“最后一个分包到达时刻 - T_tx/2”作为采样时刻（居中）
-        const double t_last   = now_mono_raw();
-        const double t_sample = t_last - 0.5 * T_tx;
-
-        ov_core::ImuData message;
-        message.timestamp = t_sample; // 统一 MONOTONIC_RAW 时基
-        // gyro: dps -> rad/s
-        message.wm << (double)current_imu.w.x(), (double)current_imu.w.y(), (double)current_imu.w.z();
-        message.wm *= M_PI / 180.0;
-        message.am << (double)current_imu.a.x(), (double)current_imu.a.y(), (double)current_imu.a.z();
-        message.hm << (double)current_imu.h.x(), (double)current_imu.h.y(), (double)current_imu.h.z();
-
-        // Rm 仅用于可视化：避免把设备内部姿态参与滤波（易不一致）
-        message.Rm = IMUSerial::rpy2R(current_imu.angle).cast<double>();
-
-        if (is_debug) writeIMUFrameCSV(message);
-
-        // 喂给 VIO
-        _app->feed_measurement_imu(message);
-        _viz->publishIMU("raw_imu", int64_t(message.timestamp * 1e6), "IMU",
-                         message.am, message.wm, Eigen::Quaterniond(message.Rm), message.hm);
-        visualize_odometry(message.timestamp);
-
-        // 可视化 IMU朝向（此处用单位阵，仅作为占位演示）
-        Eigen::Matrix4f T_w_imu = Eigen::Matrix4f::Identity();
-        T_w_imu.block(0, 0, 3, 3) = message.Rm.cast<float>();
-        _viz->showPose("imu_angle", int64_t(message.timestamp * 1e6), T_w_imu, "LOCAL_WORLD", "IMU_R");
-
-        // 清空等待下一帧
-        current_imu = IMUSerial::IMUDATA();
-
-        // 触发消费相机队列（带固定延迟去抖）
-        if (!thread_update_running) {
-          thread_update_running = true;
-          std::thread thread([&, t_sample]() {
-            // IMU时刻换到“相机时基下的IMU时刻” （两者都用 MONOTONIC_RAW → 直接用）
-            double timestamp_imu_inC = t_sample - _app->get_state()->_calib_dt_CAMtoIMU->value()(0);
-
-            while (true) {
-              ov_core::CameraData front;
-              {
-                std::lock_guard<std::mutex> lck(camera_queue_mtx);
-                if (camera_queue.empty()) break;
-
-                // 固定延迟条件：只有“相机戳 + 固定延迟 < imu_inC”才消费
-                if ((camera_queue.front().timestamp + CAM_FIXED_LATENCY) >= timestamp_imu_inC) break;
-
-                front = camera_queue.front();
-                camera_queue.pop_front();
-              }
-
-              auto t0 = boost::posix_time::microsec_clock::local_time();
-
-              double update_dt_ms = 1000.0 * (timestamp_imu_inC - front.timestamp);
-              last_images_timestamp = front.timestamp;
-              last_images = front.images;
-
-              _app->feed_measurement_camera(front);
-              auto t1 = boost::posix_time::microsec_clock::local_time();
-              publish_cameras();
-              visualize();
-              auto t2 = boost::posix_time::microsec_clock::local_time();
-
-              double time_slam = (t1 - t0).total_microseconds() * 1e-6;
-              double time_total = (t2 - t0).total_microseconds() * 1e-6;
-              _dash_board->setNameAndValue(0, "TIME", time_total);
-              _dash_board->setNameAndValue(1, "TIME_SLAM", time_slam);
-              _dash_board->setNameAndValue(2, "HZ", 1.0 / time_total);
-              _dash_board->setNameAndValue(3, "UPDATE_DT_MS", update_dt_ms);
-              _dash_board->print();
-              PRINT_INFO(BLUE "[TIME]: %.4f total, %.4f slam (%.1f hz, %.2f ms behind)\n" RESET,
-                         time_total, time_slam, 1.0 / time_total, update_dt_ms);
-            }
-            thread_update_running = false;
-          });
-          thread.detach();
-        }
-      }
+  if (!imu_log_file_) {
+    imu_log_file_ = std::make_shared<std::ofstream>(debug_dir + "/imu_data.txt", std::ios::app);
+    if (imu_log_file_ && imu_log_file_->tellp() == 0) {
+      (*imu_log_file_) << "# timestamp,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z,qw,qx,qy,qz,mag_x,mag_y,mag_z\n";
     }
   }
+  auto writeIMUFrameCSV = [&](const ov_core::ImuData &msg) {
+    if (!imu_log_file_ || !imu_log_file_->good()) return;
+    Eigen::Quaterniond q(msg.Rm);
+    (*imu_log_file_) << std::fixed << std::setprecision(6) << msg.timestamp << ","
+                     << msg.am(0) << "," << msg.am(1) << "," << msg.am(2) << ","
+                     << msg.wm(0) << "," << msg.wm(1) << "," << msg.wm(2) << ","
+                     << q.w() << "," << q.x() << "," << q.y() << "," << q.z() << ","
+                     << msg.hm(0) << "," << msg.hm(1) << "," << msg.hm(2) << "\n";
+    imu_log_file_->flush();
+  };
 
-  imu_file.close();
-  close(fd);
-  fd = -1;
+  // 创建并启动驱动
+  imu_driver_ = std::make_shared<ImuDriver>(imu_device_);
+  imu_driver_->setCallback([&](const ImuSample& s){
+    // 转换为 ov_core::ImuData
+    ov_core::ImuData msg;
+    msg.timestamp = s.timestamp;
+    if (s.has_gyro)  msg.wm = s.gyro;
+    if (s.has_accel) msg.am = s.accel;
+    if (s.has_mag)   msg.hm = s.mag;
+    if (s.has_R)     msg.Rm = s.R; else msg.Rm.setIdentity();
+
+    if (is_debug) writeIMUFrameCSV(msg);
+
+    _app->feed_measurement_imu(msg);
+    _viz->publishIMU("raw_imu", int64_t(msg.timestamp * 1e6), "IMU",
+                     msg.am, msg.wm, Eigen::Quaterniond(msg.Rm), msg.hm);
+    visualize_odometry(msg.timestamp);
+
+    Eigen::Matrix4f T_w_imu = Eigen::Matrix4f::Identity();
+    T_w_imu.block(0, 0, 3, 3) = msg.Rm.cast<float>();
+    _viz->showPose("imu_angle", int64_t(msg.timestamp * 1e6), T_w_imu, "LOCAL_WORLD", "IMU_R");
+
+    // 触发消费相机队列（固定延迟落后条件）
+    // 更新 IMU 时间 (转换到相机时基) 并唤醒消费者
+    double timestamp_imu_inC = msg.timestamp - _app->get_state()->_calib_dt_CAMtoIMU->value()(0);
+    {
+      std::lock_guard<std::mutex> lk(imu_time_mtx_);
+      last_imu_timestamp_inC_ = timestamp_imu_inC;
+      imu_new_flag_ = true;
+    }
+    imu_cv_.notify_one();
+  });
+
+  if (!imu_driver_->start()) {
+    PRINT_ERROR("Failed to start IMU driver (%s).\n", imu_device_.c_str());
+  } else {
+    PRINT_INFO("IMU driver started on %s\n", imu_device_.c_str());
+  }
+
+  // 启动统一消费者线程（只启动一次）
+  if (!running_) {
+    running_ = true;
+    consumer_thread_ = std::thread([&]{
+      while (running_) {
+        std::unique_lock<std::mutex> lk(imu_time_mtx_);
+        imu_cv_.wait(lk, [&]{ return !running_ || imu_new_flag_; });
+        if (!running_) break;
+        imu_new_flag_ = false;
+        double imu_ts_inC = last_imu_timestamp_inC_;
+        lk.unlock();
+
+        // 消费相机队列（固定延迟）
+        while (true) {
+          ov_core::CameraData front;
+            {
+              std::lock_guard<std::mutex> qlk(camera_queue_mtx);
+              if (camera_queue.empty()) break;
+              if ((camera_queue.front().timestamp + cam_fixed_latency_) >= imu_ts_inC) break;
+              front = camera_queue.front();
+              camera_queue.pop_front();
+            }
+            auto t0 = boost::posix_time::microsec_clock::local_time();
+            double update_dt_ms = 1000.0 * (imu_ts_inC - front.timestamp);
+            last_images_timestamp = front.timestamp;
+            last_images = front.images;
+            _app->feed_measurement_camera(front);
+            auto t1 = boost::posix_time::microsec_clock::local_time();
+            publish_cameras();
+            visualize();
+            auto t2 = boost::posix_time::microsec_clock::local_time();
+            double time_slam = (t1 - t0).total_microseconds() * 1e-6;
+            double time_total = (t2 - t0).total_microseconds() * 1e-6;
+            _dash_board->setNameAndValue(0, "TIME", time_total);
+            _dash_board->setNameAndValue(1, "TIME_SLAM", time_slam);
+            _dash_board->setNameAndValue(2, "HZ", 1.0 / std::max(1e-6, time_total));
+            _dash_board->setNameAndValue(3, "UPDATE_DT_MS", update_dt_ms);
+            _dash_board->print();
+        }
+      }
+    });
+  }
 }
 
 
@@ -729,206 +643,73 @@ void FGVisualizer::visualize_odometry(double timestamp) {
 }
 
 void FGVisualizer::retrieveCamera() {
-  // ===== 相机与缓冲配置 =====
-  constexpr int WIDTH = 1280;
-  constexpr int HEIGHT = 480;
-  constexpr int BUFFER_COUNT = 8;
-  const std::string device_path = "/dev/video73";
-
-  // 调试保存
-  const std::string left_images_dir  = debug_dir + "/images/left/";
-  const std::string right_images_dir = debug_dir + "/images/right/";
-  fs::create_directories(left_images_dir);
-  fs::create_directories(right_images_dir);
-
-  // ===== 打开设备 =====
-  int fd = open(device_path.c_str(), O_RDWR);
-  if (fd == -1) { perror("open /dev/video"); return; }
-
-  // ===== 查询/打印驱动报告的目标帧率（如果驱动支持） =====
-  {
-    struct v4l2_streamparm parm{};
-    parm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (ioctl(fd, VIDIOC_G_PARM, &parm) == 0) {
-      if (parm.parm.capture.timeperframe.numerator != 0) {
-        double drv_fps =
-            (double)parm.parm.capture.timeperframe.denominator /
-            (double)parm.parm.capture.timeperframe.numerator;
-        PRINT_INFO("[V4L2] Driver-reported target FPS: %.3f (den=%u, num=%u)\n",
-                   drv_fps,
-                   parm.parm.capture.timeperframe.denominator,
-                   parm.parm.capture.timeperframe.numerator);
-      } else {
-        PRINT_INFO("[V4L2] VIDIOC_G_PARM returned zero numerator; driver may not report FPS.\n");
-      }
-    } else {
-      PRINT_INFO("[V4L2] VIDIOC_G_PARM not supported on this device.\n");
-    }
-  }
-
-  // ===== 设置格式（MJPEG：如抖动大可换 RAW/YUYV/MONO8） =====
-  v4l2_format fmt{};
-  fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  fmt.fmt.pix.width = WIDTH;
-  fmt.fmt.pix.height = HEIGHT;
-  fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
-  fmt.fmt.pix.field = V4L2_FIELD_NONE;
-  if (ioctl(fd, VIDIOC_S_FMT, &fmt) == -1) { perror("VIDIOC_S_FMT"); close(fd); return; }
-
-  // ===== 申请缓冲并 mmap =====
-  v4l2_requestbuffers req{};
-  req.count = BUFFER_COUNT;
-  req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  req.memory = V4L2_MEMORY_MMAP;
-  if (ioctl(fd, VIDIOC_REQBUFS, &req) == -1) { perror("VIDIOC_REQBUFS"); close(fd); return; }
-
-  struct Buffer { void* start; size_t length; } buffers[BUFFER_COUNT];
-  for (int i = 0; i < BUFFER_COUNT; ++i) {
-    v4l2_buffer buf{};
-    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    buf.memory = V4L2_MEMORY_MMAP;
-    buf.index = i;
-    if (ioctl(fd, VIDIOC_QUERYBUF, &buf) == -1) { perror("VIDIOC_QUERYBUF"); close(fd); return; }
-
-    buffers[i].length = buf.length;
-    buffers[i].start = mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, buf.m.offset);
-    if (buffers[i].start == MAP_FAILED) { perror("mmap"); close(fd); return; }
-
-    if (ioctl(fd, VIDIOC_QBUF, &buf) == -1) { perror("VIDIOC_QBUF"); close(fd); return; }
-  }
-
-  int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  if (ioctl(fd, VIDIOC_STREAMON, &type) == -1) { perror("VIDIOC_STREAMON"); close(fd); return; }
-
-  // ===== 建立 MONOTONIC -> MONOTONIC_RAW 的一次性偏移映射（把相机戳映射到 RAW）=====
-  timespec ts_raw{}, ts_mono{};
-  clock_gettime(CLOCK_MONOTONIC_RAW, &ts_raw);
-  clock_gettime(CLOCK_MONOTONIC,     &ts_mono);
-  const double offset_raw_minus_mono =
-      (ts_raw.tv_sec + ts_raw.tv_nsec * 1e-9) - (ts_mono.tv_sec + ts_mono.tv_nsec * 1e-9);
-
-  // ===== 统计真实采集帧率（基于 V4L2 采集戳）=====
-  // 用驱动戳（MONOTONIC）计算瞬时 FPS，再映射到 RAW 做全局统一（不影响差分）
-  double last_cam_time_mono = -1.0;
-  double ema_fps = -1.0;                 // 指数滑动平均 FPS
-  const double ema_alpha = 0.20;         // EMA平滑系数，可调 0.1~0.3
-  uint64_t frames_counted = 0;
-
-  // ===== 限频控制（防止前端队列增长造成动态时延）=====
-  static double last_timestamp_raw = -1.0;
-
-  // ===== 处理耗时统计 =====
-  static double sum_time = 0.0;
-  static int count = 0;
-
-  while (true) {
-    auto t0 = boost::posix_time::microsec_clock::local_time();
-
-    v4l2_buffer buf{};
-    buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    buf.memory = V4L2_MEMORY_MMAP;
-
-    if (ioctl(fd, VIDIOC_DQBUF, &buf) == -1) { perror("VIDIOC_DQBUF"); break; }
-
-    // ---- 关键：驱动采集完成时刻（通常 MONOTONIC）----
-    const double cam_time_mono = buf.timestamp.tv_sec + buf.timestamp.tv_usec * 1e-6;
-
-    // ---- 采集频率统计（真实 fps）----
-    if (last_cam_time_mono > 0.0) {
-      double dt = cam_time_mono - last_cam_time_mono;          // 相邻两帧采集时间差
-      if (dt > 0.0) {
-        double inst_fps = 1.0 / dt;                            // 瞬时 FPS
-        if (ema_fps < 0.0) ema_fps = inst_fps;                 // 初始化
-        else               ema_fps = ema_alpha * inst_fps + (1.0 - ema_alpha) * ema_fps;
-
-        // 每隔一定帧打印统计（比如每30帧）
-        if ((++frames_counted % 30) == 0) {
-          PRINT_INFO("[V4L2] Instant FPS: %.3f | EMA FPS: %.3f (dt=%.3f ms)\n",
-                     inst_fps, ema_fps, dt * 1000.0);
-        }
-      }
-    }
-    last_cam_time_mono = cam_time_mono;
-
-    // ---- 映射到 RAW 时基（与 IMU 统一）----
-    const double cam_time_raw = cam_time_mono + offset_raw_minus_mono;
-
-    // ---- 解码 MJPEG ----
-    std::vector<uchar> data((uchar*)buffers[buf.index].start,
-                            (uchar*)buffers[buf.index].start + buf.bytesused);
-    cv::Mat full = cv::imdecode(data, cv::IMREAD_COLOR);
-
-    if (!full.empty() && full.cols == WIDTH && full.rows == HEIGHT) {
-      // ---- 前端限频：避免图像过密导致后端排队（动态时延）----
-      const double time_delta = 1.0 / _app->get_params().track_frequency;
-      if (last_timestamp_raw >= 0.0 && cam_time_raw < last_timestamp_raw + time_delta) {
-        if (ioctl(fd, VIDIOC_QBUF, &buf) == -1) { perror("VIDIOC_QBUF (requeue)"); break; }
-        usleep(1);
-        continue;
-      }
-      last_timestamp_raw = cam_time_raw;
-
-      // ---- 构造 CameraData（左右切半，硬同步，同一时间戳 RAW）----
-      ov_core::CameraData image_msg;
-      image_msg.timestamp = cam_time_raw;   // 关键：与 IMU 完全同一时基（RAW）
-      image_msg.sensor_ids = {0, 1};
-      image_msg.images.resize(2);
-
-      cv::Mat left_color  = full(cv::Rect(0, 0, WIDTH/2, HEIGHT));
-      cv::Mat right_color = full(cv::Rect(WIDTH/2, 0, WIDTH/2, HEIGHT));
-      cv::cvtColor(left_color,  image_msg.images[0], cv::COLOR_BGR2GRAY);
-      cv::cvtColor(right_color, image_msg.images[1], cv::COLOR_BGR2GRAY);
-
-      if (_app->get_params().use_mask) {
-        image_msg.masks.push_back(_app->get_params().masks.at(0));
-        image_msg.masks.push_back(_app->get_params().masks.at(1));
-      } else {
-        image_msg.masks.emplace_back(cv::Mat::zeros(image_msg.images[0].rows, image_msg.images[0].cols, CV_8UC1));
-        image_msg.masks.emplace_back(cv::Mat::zeros(image_msg.images[1].rows, image_msg.images[1].cols, CV_8UC1));
-      }
-
-      // （可选）保存调试图
-      if (is_debug) {
-        std::ostringstream oss; oss << std::fixed << std::setprecision(6) << cam_time_raw;
-        const std::string ts_str = oss.str();
-        cv::imwrite(left_images_dir  + "/" + ts_str + ".png", image_msg.images[0]);
-        cv::imwrite(right_images_dir + "/" + ts_str + ".png", image_msg.images[1]);
-      }
-
-      // 入队（按时间有序；真正消费在 IMU 线程中结合固定延迟判断）
-      {
-        std::lock_guard<std::mutex> lock(camera_queue_mtx);
-        camera_queue.push_back(image_msg);
-      }
-
-      // 统计一帧端到端处理耗时（不含解码外的后端）
-      auto t1 = boost::posix_time::microsec_clock::local_time();
-      double dt_proc = (t1 - t0).total_microseconds() * 1e-6;
-      sum_time += dt_proc; ++count;
-      PRINT_INFO("[CAMERA TIME]: %.6f seconds (avg %.6f)\n", dt_proc, sum_time / count);
-    } else {
-      std::cerr << "图像解码失败或尺寸错误\n";
-    }
-
-    if (ioctl(fd, VIDIOC_QBUF, &buf) == -1) { perror("VIDIOC_QBUF (requeue)"); break; }
-    usleep(1);
-  }
-
-  ioctl(fd, VIDIOC_STREAMOFF, &type);
-  for (int i = 0; i < BUFFER_COUNT; ++i) {
-    munmap(buffers[i].start, buffers[i].length);
-  }
-  close(fd);
+  startCameraDriver();
 }
 
+void FGVisualizer::startCameraDriver() {
+  using namespace ov_sensors;
+  if (cam_driver_) return; // 已启动
+  V4L2CameraDriver::Config cfg; // 默认参数，可后续从 YAML 读取
+  cfg.device = cam_device_; // 可配置
+  cfg.track_frequency = _app->get_params().track_frequency;
+  cam_driver_ = std::make_shared<V4L2CameraDriver>(cfg);
+  cam_driver_->setCallback([&](const CameraFrame& f){
+    ov_core::CameraData msg;
+    msg.timestamp = f.timestamp_raw;
+    msg.sensor_ids = f.sensor_ids;
+    // clone 防止底层复用缓冲
+    msg.images.resize(f.images.size());
+    for (size_t i=0;i<f.images.size();++i) msg.images[i] = f.images[i].clone();
+    if (_app->get_params().use_mask) {
+      msg.masks.push_back(_app->get_params().masks.at(0));
+      msg.masks.push_back(_app->get_params().masks.at(1));
+    } else {
+      msg.masks.emplace_back(cv::Mat::zeros(f.images[0].rows, f.images[0].cols, CV_8UC1));
+      msg.masks.emplace_back(cv::Mat::zeros(f.images[1].rows, f.images[1].cols, CV_8UC1));
+    }
+    std::lock_guard<std::mutex> lk(camera_queue_mtx);
+    constexpr size_t MAX_Q = 240; // ~12s @20Hz
+    if (camera_queue.size() >= MAX_Q) camera_queue.pop_front();
+    camera_queue.push_back(std::move(msg));
+  });
+  if (!cam_driver_->start()) {
+    PRINT_ERROR("Camera driver start failed.\n");
+  } else {
+    PRINT_INFO("Camera driver started on %s\n", cam_device_.c_str());
+  }
+}
 
+void FGVisualizer::stopDrivers() {
+  // 停止消费者
+  if (running_) {
+    running_ = false;
+    imu_cv_.notify_all();
+    if (consumer_thread_.joinable()) consumer_thread_.join();
+  }
+  // 停止驱动
+  if (imu_driver_) { imu_driver_->stop(); imu_driver_.reset(); }
+  if (cam_driver_) { cam_driver_->stop(); cam_driver_.reset(); }
+  // 关闭姿态串口
+  if (pose_serial_open_ && pose_serial_fd_>=0) { ::close(pose_serial_fd_); pose_serial_fd_=-1; pose_serial_open_=false; }
+}
 
+static int openPoseSerial(const std::string &dev){
+  int fd = ::open(dev.c_str(), O_RDWR | O_NOCTTY | O_NONBLOCK);
+  if (fd < 0) { perror("open pose serial"); return -1; }
+  termios tty{}; if (tcgetattr(fd,&tty)!=0){ perror("tcgetattr pose"); ::close(fd); return -1; }
+  cfsetospeed(&tty,B115200); cfsetispeed(&tty,B115200);
+  tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8; tty.c_iflag &= ~IGNBRK; tty.c_lflag=0; tty.c_oflag=0; tty.c_cc[VMIN]=0; tty.c_cc[VTIME]=0;
+  tty.c_cflag |= (CLOCAL | CREAD); tty.c_cflag &= ~(PARENB | PARODD); tty.c_cflag &= ~CSTOPB; tty.c_cflag &= ~CRTSCTS;
+  if (tcsetattr(fd,TCSANOW,&tty)!=0){ perror("tcsetattr pose"); ::close(fd); return -1; }
+  return fd;
+}
 
 void FGVisualizer::run() {
-  std::thread cam_thread(&FGVisualizer::retrieveCamera, this);
-  cam_thread.detach();
-
+  retrieveCamera();
   retrieveIMU();
+  while (true) {
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
 }
 
 void FGVisualizer::visualize() {
@@ -981,40 +762,12 @@ void FGVisualizer::publish_state() {
   };
   
    // ========== 打开串口5 (/dev/ttyS5) ==========
-   int fd = open("/dev/ttyS5", O_RDWR | O_NOCTTY | O_NONBLOCK); // 非阻塞模式
-    if (fd < 0) {
-        std::cerr << "Error opening /dev/ttyS5" << std::endl;
-        //return;
+    if (!pose_serial_open_) {
+      pose_serial_fd_ = openPoseSerial(pose_serial_device_);
+      pose_serial_open_ = pose_serial_fd_>=0;
     }
-
-    struct termios tty{};
-    if (tcgetattr(fd, &tty) != 0) {
-        std::cerr << "Error from tcgetattr" << std::endl;
-        close(fd);
-        //return;
-    }
-
-    cfsetospeed(&tty, B115200);
-    cfsetispeed(&tty, B115200);
-
-    tty.c_cflag = (tty.c_cflag & ~CSIZE) | CS8;  // 8位数据
-    tty.c_iflag &= ~IGNBRK;
-    tty.c_lflag = 0;   // 原始模式
-    tty.c_oflag = 0;
-    tty.c_cc[VMIN]  = 0; // 非阻塞读取
-    tty.c_cc[VTIME] = 0;
-
-    tty.c_cflag |= (CLOCAL | CREAD); // 打开接收功能
-    tty.c_cflag &= ~(PARENB | PARODD); // 无校验
-    tty.c_cflag &= ~CSTOPB;            // 1位停止位
-    tty.c_cflag &= ~CRTSCTS;           // 无流控
-
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) {
-        std::cerr << "Error from tcsetattr" << std::endl;
-        close(fd);
-        //return;
-    }
-
+    int fd = pose_serial_fd_;
+    if (fd>=0) {
     std::vector<uint8_t> frame;
     frame.push_back(0xAA);
     frame.push_back(0x55);
@@ -1025,17 +778,9 @@ void FGVisualizer::publish_state() {
     frame.push_back(0x0D);
 
     // ========== 发送数据 ==========
-    ssize_t written = write(fd, frame.data(), frame.size());
-    if (written < 0) {
-        std::cerr << "Error writing to serial" << std::endl;
-    } else {
-        //std::cout << "x " << pose6d << " bytes" << std::endl;
-        //std::cout << "Position: x=" << static_cast<float>(state_plus(4))
-         // << ", y=" << static_cast<float>(state_plus(5))
-          //<< ", z=" << static_cast<float>(state_plus(6)) << std::endl;
-    }
-
-    close(fd);  
+    ssize_t written = ::write(fd, frame.data(), frame.size());
+    (void)written;
+  }
 
 
   /***************************************六自由度数据输出end*************************************/
