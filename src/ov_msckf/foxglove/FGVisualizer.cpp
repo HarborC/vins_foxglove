@@ -51,27 +51,6 @@ namespace {
   }
 }
 
-namespace IMUSerial {
-Eigen::Matrix3f rpy2R(const Eigen::Vector3f& rpy) {
-    float roll = rpy(0);
-    float pitch = rpy(1);
-    float yaw = rpy(2);
-
-    // 转换为弧度
-    float roll_rad = roll * M_PI / 180.0;
-    float pitch_rad = pitch * M_PI / 180.0;
-    float yaw_rad = yaw * M_PI / 180.0;
-
-    // 构建 Eigen 旋转矩阵
-    Eigen::Matrix3f R;
-    R = Eigen::AngleAxisf(yaw_rad,   Eigen::Vector3f::UnitZ()) *
-        Eigen::AngleAxisf(pitch_rad, Eigen::Vector3f::UnitY()) *
-        Eigen::AngleAxisf(roll_rad,  Eigen::Vector3f::UnitX());
-    
-    return R;
-}
-}
-
 FGVisualizer::FGVisualizer(std::shared_ptr<VioManager> app, std::shared_ptr<Simulator> sim)
   : _app(app), _sim(sim), thread_update_running(false) {
 
