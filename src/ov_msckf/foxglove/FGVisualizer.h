@@ -40,8 +40,6 @@ public:
   // 结束后输出最终可视化（如参数、RMSE等）
   void visualize_final();
 
-  // 启动 IMU 数据采集线程
-  void retrieveIMU();
   // 使用独立驱动后的启动接口（向后兼容）
   void startIMUDriver();
   void startCameraDriver();
@@ -50,9 +48,6 @@ public:
                             const std::string &cam_dev,
                             const std::string &pose_dev,
                             double cam_latency);
-
-  // 启动相机图像采集线程
-  void retrieveCamera();
 
   void runRealsenseIO();
 
@@ -78,33 +73,6 @@ public:
 
   // 创建调试输出文件夹
   void create_debug_dir();
-
-#if ROS_AVAILABLE == 1
-  // ROS 下的订阅器初始化函数
-  void setup_subscribers(std::shared_ptr<ros::NodeHandle> nh, std::shared_ptr<ov_core::YamlParser> parser);
-
-  // IMU 消息回调
-  void callback_inertial(const sensor_msgs::Imu::ConstPtr &msg);
-
-  // 单目图像回调
-  void callback_monocular(const sensor_msgs::ImageConstPtr &msg0, int cam_id0);
-
-  // 双目图像同步回调
-  void callback_stereo(const sensor_msgs::ImageConstPtr &msg0, const sensor_msgs::ImageConstPtr &msg1, int cam_id0, int cam_id1);
-
-  // ROS 订阅器与同步器
-  ros::Subscriber sub_imu;
-  std::vector<ros::Subscriber> subs_cam;
-
-  // 同步策略定义（近似时间同步）
-  typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, sensor_msgs::Image> sync_pol;
-
-  // 同步器列表（双目）
-  std::vector<std::shared_ptr<message_filters::Synchronizer<sync_pol>>> sync_cam;
-
-  // 原始图像订阅器列表（双目）
-  std::vector<std::shared_ptr<message_filters::Subscriber<sensor_msgs::Image>>> sync_subs_cam;
-#endif
 
   // VIO 管理器核心对象
   std::shared_ptr<VioManager> _app;

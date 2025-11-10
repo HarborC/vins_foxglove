@@ -462,8 +462,6 @@ void FGVisualizer::setDevicesAndLatency(const std::string &imu_dev,
   cam_fixed_latency_ = cam_latency;
 }
 
-void FGVisualizer::retrieveIMU() { startIMUDriver(); }
-
 void FGVisualizer::startIMUDriver() {
   using namespace ov_sensors;
   if (imu_driver_) return; // guard
@@ -617,12 +615,7 @@ void FGVisualizer::visualize_odometry(double timestamp) {
     }
   }
 
-
   _viz->showPath("path_imu_odom_win10", time_us, path_imu, "LOCAL_WORLD");
-}
-
-void FGVisualizer::retrieveCamera() {
-  startCameraDriver();
 }
 
 void FGVisualizer::startCameraDriver() {
@@ -684,8 +677,8 @@ static int openPoseSerial(const std::string &dev){
 }
 
 void FGVisualizer::run() {
-  retrieveCamera();
-  retrieveIMU();
+  startCameraDriver();
+  startIMUDriver();
   while (true) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
@@ -730,7 +723,7 @@ void FGVisualizer::publish_state() {
   poseIinM.block(0, 3, 3, 1) = state->_imu->pos();
   Eigen::Matrix4f poseIinM_f = poseIinM.cast<float>();
 
-    /***************************************六自由度数据输出start*************************************/
+  /***************************************六自由度数据输出start*************************************/
   Eigen::Vector3f pos = state->_imu->pos().cast<float>();
   Eigen::Quaternionf q_IinM_f(q_IinM.cast<float>());
   Eigen::Vector3f euler = q_IinM_f.toRotationMatrix().eulerAngles(0, 1, 2); // RPY
@@ -740,13 +733,13 @@ void FGVisualizer::publish_state() {
     euler[0], euler[1], euler[2] // roll,pitch,yaw
   };
   
-   // ========== 打开串口5 (/dev/ttyS5) ==========
-    if (!pose_serial_open_) {
-      pose_serial_fd_ = openPoseSerial(pose_serial_device_);
-      pose_serial_open_ = pose_serial_fd_>=0;
-    }
-    int fd = pose_serial_fd_;
-    if (fd>=0) {
+  // ========== 打开串口5 (/dev/ttyS5) ==========
+  if (!pose_serial_open_) {
+    pose_serial_fd_ = openPoseSerial(pose_serial_device_);
+    pose_serial_open_ = pose_serial_fd_>=0;
+  }
+  int fd = pose_serial_fd_;
+  if (fd>=0) {
     std::vector<uint8_t> frame;
     frame.push_back(0xAA);
     frame.push_back(0x55);
@@ -760,12 +753,8 @@ void FGVisualizer::publish_state() {
     ssize_t written = ::write(fd, frame.data(), frame.size());
     (void)written;
   }
-
-
   /***************************************六自由度数据输出end*************************************/
   
-  
-
   poses_imu.push_back(std::pair<double, Eigen::Matrix4f>(timestamp_inI, poseIinM_f));
 
   _viz->showPose("pose_imu", time_us, poseIinM_f, "LOCAL_WORLD", "IMU");
@@ -901,204 +890,3 @@ void FGVisualizer::publish_images() {
   _viz->showImage("track_images", time_us, img_history_downsampled, "STEREO", true);
 }
 
-#if ROS_AVAILABLE == 1
-void FGVisualizer::setup_subscribers(std::shared_ptr<ros::NodeHandle> nh, std::shared_ptr<ov_core::YamlParser> parser) {
-
-  // We need a valid parser
-  assert(parser != nullptr);
-
-  // Create imu subscriber (handle legacy ros param info)
-  std::string topic_imu;
-  nh->param<std::string>("topic_imu", topic_imu, "/imu0");
-  parser->parse_external("relative_config_imu", "imu0", "rostopic", topic_imu);
-  sub_imu = nh->subscribe(topic_imu, 1000, &FGVisualizer::callback_inertial, this);
-  PRINT_INFO("subscribing to IMU: %s\n", topic_imu.c_str());
-
-  // Logic for sync stereo subscriber
-  // https://answers.ros.org/question/96346/subscribe-to-two-image_raws-with-one-function/?answer=96491#post-id-96491
-  if (_app->get_params().state_options.num_cameras == 2) {
-    // Read in the topics
-    std::string cam_topic0, cam_topic1;
-    nh->param<std::string>("topic_camera" + std::to_string(0), cam_topic0, "/cam" + std::to_string(0) + "/image_raw");
-    nh->param<std::string>("topic_camera" + std::to_string(1), cam_topic1, "/cam" + std::to_string(1) + "/image_raw");
-    parser->parse_external("relative_config_imucam", "cam" + std::to_string(0), "rostopic", cam_topic0);
-    parser->parse_external("relative_config_imucam", "cam" + std::to_string(1), "rostopic", cam_topic1);
-    // Create sync filter (they have unique pointers internally, so we have to use move logic here...)
-    auto image_sub0 = std::make_shared<message_filters::Subscriber<sensor_msgs::Image>>(*nh, cam_topic0, 1);
-    auto image_sub1 = std::make_shared<message_filters::Subscriber<sensor_msgs::Image>>(*nh, cam_topic1, 1);
-    auto sync = std::make_shared<message_filters::Synchronizer<sync_pol>>(sync_pol(10), *image_sub0, *image_sub1);
-    sync->registerCallback(boost::bind(&FGVisualizer::callback_stereo, this, _1, _2, 0, 1));
-    // Append to our vector of subscribers
-    sync_cam.push_back(sync);
-    sync_subs_cam.push_back(image_sub0);
-    sync_subs_cam.push_back(image_sub1);
-    PRINT_INFO("subscribing to cam (stereo): %s\n", cam_topic0.c_str());
-    PRINT_INFO("subscribing to cam (stereo): %s\n", cam_topic1.c_str());
-  } else {
-    // Now we should add any non-stereo callbacks here
-    for (int i = 0; i < _app->get_params().state_options.num_cameras; i++) {
-      // read in the topic
-      std::string cam_topic;
-      nh->param<std::string>("topic_camera" + std::to_string(i), cam_topic, "/cam" + std::to_string(i) + "/image_raw");
-      parser->parse_external("relative_config_imucam", "cam" + std::to_string(i), "rostopic", cam_topic);
-      // create subscriber
-      subs_cam.push_back(nh->subscribe<sensor_msgs::Image>(cam_topic, 10, boost::bind(&FGVisualizer::callback_monocular, this, _1, i)));
-      PRINT_INFO("subscribing to cam (mono): %s\n", cam_topic.c_str());
-    }
-  }
-}
-
-void FGVisualizer::callback_inertial(const sensor_msgs::Imu::ConstPtr &msg) {
-  // convert into correct format
-  ov_core::ImuData message;
-  message.timestamp = msg->header.stamp.toSec();
-  message.wm << msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z;
-  message.am << msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z;
-  Eigen::Quaterniond q_IinM(msg->orientation.w, msg->orientation.x, msg->orientation.y, msg->orientation.z);
-  message.Rm = q_IinM.toRotationMatrix();
-
-  // send it to our VIO system
-  _app->feed_measurement_imu(message);
-
-  _viz->publishIMU("raw_imu", int64_t(message.timestamp * 1e6), "IMU", message.am, message.wm, Eigen::Quaterniond(message.Rm),
-                         message.hm);
-
-  Eigen::Matrix4f T_w_imu = Eigen::Matrix4f::Identity();
-  T_w_imu.block(0, 0, 3, 3) = message.Rm.cast<float>();
-  _viz->showPose("imu_angle", int64_t(message.timestamp * 1e6), T_w_imu, "LOCAL_WORLD", "IMU_R");
-
-  if (thread_update_running)
-    return;
-  thread_update_running = true;
-  std::thread thread([&] {
-    // Loop through our queue and see if we are able to process any of our camera measurements
-    // We are able to process if we have at least one IMU measurement greater than the camera time
-    double timestamp_imu_inC = message.timestamp - _app->get_state()->_calib_dt_CAMtoIMU->value()(0);
-    while (!camera_queue.empty() && camera_queue.at(0).timestamp < timestamp_imu_inC) {
-      auto rT0_1 = boost::posix_time::microsec_clock::local_time();
-      double update_dt = 1000.0 * (timestamp_imu_inC - camera_queue.at(0).timestamp);
-
-      last_images_timestamp = camera_queue.at(0).timestamp;
-      last_images = camera_queue.at(0).images;
-
-      _app->feed_measurement_camera(camera_queue.at(0));
-      auto rT0_2 = boost::posix_time::microsec_clock::local_time();
-      publish_cameras();
-      visualize();
-
-      {
-        std::lock_guard<std::mutex> lck(camera_queue_mtx);
-        camera_queue.pop_front();
-      }
-      
-      auto rT0_3 = boost::posix_time::microsec_clock::local_time();
-      double time_slam = (rT0_2 - rT0_1).total_microseconds() * 1e-6;
-      double time_total = (rT0_3 - rT0_1).total_microseconds() * 1e-6;
-      _dash_board->setNameAndValue(0, "TIME", time_total);
-      _dash_board->setNameAndValue(1, "TIME_SLAM", time_slam);
-      _dash_board->setNameAndValue(2, "HZ", 1.0 / time_total);
-      _dash_board->setNameAndValue(3, "UPDATE_DT", update_dt);
-      _dash_board->print();
-      PRINT_INFO(BLUE "[TIME]: %.4f seconds total, %.4f seconds slam (%.1f hz, %.2f ms behind)\n" RESET, time_total, time_slam, 1.0 / time_total, update_dt);
-    }
-    
-    thread_update_running = false;
-  });
-
-  thread.detach();
-}
-
-void FGVisualizer::callback_monocular(const sensor_msgs::ImageConstPtr &msg0, int cam_id0) {
-
-  // Check if we should drop this image
-  double timestamp = msg0->header.stamp.toSec();
-  double time_delta = 1.0 / _app->get_params().track_frequency;
-  if (camera_last_timestamp.find(cam_id0) != camera_last_timestamp.end() && timestamp < camera_last_timestamp.at(cam_id0) + time_delta) {
-    return;
-  }
-  camera_last_timestamp[cam_id0] = timestamp;
-
-  // Get the image
-  cv_bridge::CvImageConstPtr cv_ptr;
-  try {
-    cv_ptr = cv_bridge::toCvShare(msg0, sensor_msgs::image_encodings::MONO8);
-  } catch (cv_bridge::Exception &e) {
-    PRINT_ERROR("cv_bridge exception: %s", e.what());
-    return;
-  }
-
-  // Create the measurement
-  ov_core::CameraData message;
-  message.timestamp = cv_ptr->header.stamp.toSec();
-  message.sensor_ids.push_back(cam_id0);
-  message.images.push_back(cv_ptr->image.clone());
-
-  // Load the mask if we are using it, else it is empty
-  // TODO: in the future we should get this from external pixel segmentation
-  if (_app->get_params().use_mask) {
-    message.masks.push_back(_app->get_params().masks.at(cam_id0));
-  } else {
-    message.masks.push_back(cv::Mat::zeros(cv_ptr->image.rows, cv_ptr->image.cols, CV_8UC1));
-  }
-
-  // append it to our queue of images
-  std::lock_guard<std::mutex> lck(camera_queue_mtx);
-  camera_queue.push_back(message);
-  std::sort(camera_queue.begin(), camera_queue.end());
-}
-
-void FGVisualizer::callback_stereo(const sensor_msgs::ImageConstPtr &msg0, const sensor_msgs::ImageConstPtr &msg1, int cam_id0,
-                                     int cam_id1) {
-
-  // // Check if we should drop this image
-  // double timestamp = msg0->header.stamp.toSec();
-  // double time_delta = 1.0 / _app->get_params().track_frequency;
-  // if (camera_last_timestamp.find(cam_id0) != camera_last_timestamp.end() && timestamp < camera_last_timestamp.at(cam_id0) + time_delta) {
-  //   return;
-  // }
-  // camera_last_timestamp[cam_id0] = timestamp;
-
-  // Get the image
-  cv_bridge::CvImageConstPtr cv_ptr0;
-  try {
-    cv_ptr0 = cv_bridge::toCvShare(msg0, sensor_msgs::image_encodings::MONO8);
-  } catch (cv_bridge::Exception &e) {
-    PRINT_ERROR("cv_bridge exception: %s\n", e.what());
-    return;
-  }
-
-  // Get the image
-  cv_bridge::CvImageConstPtr cv_ptr1;
-  try {
-    cv_ptr1 = cv_bridge::toCvShare(msg1, sensor_msgs::image_encodings::MONO8);
-  } catch (cv_bridge::Exception &e) {
-    PRINT_ERROR("cv_bridge exception: %s\n", e.what());
-    return;
-  }
-
-  // Create the measurement
-  ov_core::CameraData message;
-  message.timestamp = cv_ptr0->header.stamp.toSec();
-  message.sensor_ids.push_back(cam_id0);
-  message.sensor_ids.push_back(cam_id1);
-  message.images.push_back(cv_ptr0->image.clone());
-  message.images.push_back(cv_ptr1->image.clone());
-
-  // Load the mask if we are using it, else it is empty
-  // TODO: in the future we should get this from external pixel segmentation
-  if (_app->get_params().use_mask) {
-    message.masks.push_back(_app->get_params().masks.at(cam_id0));
-    message.masks.push_back(_app->get_params().masks.at(cam_id1));
-  } else {
-    // message.masks.push_back(cv::Mat(cv_ptr0->image.rows, cv_ptr0->image.cols, CV_8UC1, cv::Scalar(255)));
-    message.masks.push_back(cv::Mat::zeros(cv_ptr0->image.rows, cv_ptr0->image.cols, CV_8UC1));
-    message.masks.push_back(cv::Mat::zeros(cv_ptr1->image.rows, cv_ptr1->image.cols, CV_8UC1));
-  }
-
-  // append it to our queue of images
-  std::lock_guard<std::mutex> lck(camera_queue_mtx);
-  camera_queue.push_back(message);
-  // std::sort(camera_queue.begin(), camera_queue.end());
-}
-
-#endif
