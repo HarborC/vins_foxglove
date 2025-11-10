@@ -13,8 +13,7 @@ cam0:
   intrinsics: [337.92998800622496, 337.83234057889973, 312.92976059844665, 250.4742930833751]
   resolution: [640, 480]
   rostopic: /camera/left
-  # timeshift_cam_imu: 0.01227297033551614
-  timeshift_cam_imu: 0.0
+  timeshift_cam_imu: 0.01227297033551614
 cam1:
   T_imu_cam:
     - [-0.05471160, -0.00652228,  0.99848090,  0.09056487]
@@ -28,5 +27,4 @@ cam1:
   intrinsics: [337.7472195215798, 337.7343377107491, 310.92319279541255, 248.4987569822615]
   resolution: [640, 480]
   rostopic: /camera/right
-  # timeshift_cam_imu: 0.01235100418575175
-  timeshift_cam_imu: 0.0
+  timeshift_cam_imu: 0.01235100418575175

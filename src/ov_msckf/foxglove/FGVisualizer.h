@@ -6,6 +6,7 @@
 #include <fstream>
 #include <memory>
 #include <mutex>
+#include <deque>
 
 // 第三方库
 #include <Eigen/Eigen>
@@ -76,11 +77,15 @@ public:
   // 启动相机图像采集线程
   void retrieveCamera();
 
+  void runRealsenseIO();
+
   // 运行主函数，启动各线程
   void run();
 
   // 可视化主接口，调用状态、轨迹、特征等发布
   void visualize();
+
+  void visualize_odometry(double timestamp) ;
 
   // 发布历史图像
   void publish_images();
@@ -160,7 +165,9 @@ public:
 
   // IMU 轨迹
   unsigned int poses_seq_imu = 0;
-  std::vector<Eigen::Matrix4f> poses_imu;
+  std::vector<std::pair<double, Eigen::Matrix4f>> poses_imu;
+  std::deque<std::pair<double, Eigen::Matrix4f>> poses_imu_dq;
+  std::deque<std::pair<double, Eigen::Matrix4f>> poses_imu_odom;
 
   // 可视化器指针
   foxglove_viz::Visualizer::Ptr _viz;
@@ -176,7 +183,7 @@ public:
   double new_imu_timestamp = -1;
 
   // 日志输出根目录
-  std::string debug_dir = "/home/cat/projects/debug/";
+  std::string debug_dir = "./debug_data/";
 
   // 是否为调试模式（控制是否保存图像/IMU）
   bool is_debug = false;

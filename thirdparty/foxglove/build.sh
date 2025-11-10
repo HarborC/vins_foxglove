@@ -3,9 +3,9 @@
 BASE_DIR=$(cd $(dirname $0);pwd)
 cd ${BASE_DIR}
 
-rm -r build
-rm -r ./src/proto/foxglove/*.pb.cc
-rm -r ./src/proto/foxglove/*.pb.h
+sudo rm -r build
+sudo rm -r ./src/proto/foxglove/*.pb.cc
+sudo rm -r ./src/proto/foxglove/*.pb.h
 
 mkdir build
 cd build
@@ -14,6 +14,6 @@ make -j2
 sudo make install
 cd ..
 
-# rm -r build
-# rm -r ./src/proto/foxglove/*.pb.cc
-# rm -r ./src/proto/foxglove/*.pb.h
+sudo rm -r build
+sudo rm -r ./src/proto/foxglove/*.pb.cc
+sudo rm -r ./src/proto/foxglove/*.pb.h

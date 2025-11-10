@@ -65,36 +65,70 @@ struct Buffer {
     size_t length;
 };
 
+inline double now_mono_raw() {
+  timespec ts;
+  clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
+  return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
 // 采集 IMU 数据的函数
 void retrieveIMU() {
     std::string serial_device = "/dev/ttyS3"; // 串口设备路径
+    const double G = 9.81;
+    // 串口帧格式与波特率（用于估算分包传输时间）
+    constexpr double BAUD = 230400.0;
+    constexpr double BITS_PER_BYTE = 10.0;    // 1起始 + 8数据 + 1停止
+    constexpr double BYTES_PER_SUBPKT = 11.0; // 你的协议每小包11字节
+    constexpr double T_packet = (BITS_PER_BYTE * BYTES_PER_SUBPKT) / BAUD; // ≈0.000478s
+    constexpr double T_tx = 4.0 * T_packet;   // 四个分包合计 ≈1.9ms
+    // 固定延迟缓冲（把端到端延迟“变长”→“常数”）
+    constexpr double CAM_FIXED_LATENCY = 0.030; // 30ms，可按抖动调到 0.03~0.05
+
+
     std::ofstream imu_file(root_dir + "/imu_data.txt", std::ios::app);
     imu_file << "# timestamp,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z,ang_x,ang_y,ang_z\n";
 
-    // 打开串口设备
+    // 打开串口
     int fd = open(serial_device.c_str(), O_RDWR | O_NOCTTY);
-    if (fd == -1) {
-        perror("open serial");
-        return;
-    }
+    if (fd == -1) { perror("open serial"); return; }
 
-    // 配置串口参数
-    struct termios tty;
-    tcgetattr(fd, &tty);
+    printf("open %s success!\n", serial_device.c_str());
+    if (isatty(STDIN_FILENO) == 0)
+        printf("standard input is not a terminal device\n");
+    else
+        printf("isatty success!\n");
+
+    // 串口参数
+    struct termios tty{}, oldtio;
+    if (tcgetattr(fd, &oldtio) != 0) { perror("tcgetattr"); close(fd); return; }
+    memset(&tty, 0, sizeof(tty));
+    
+    tty.c_cflag |= CLOCAL | CREAD;
+    tty.c_cflag &= ~CSIZE;
+    tty.c_cflag |= CS8;
+    tty.c_cflag &= ~PARENB;
+
+    tty.c_cflag &= ~CRTSCTS;
+
+    tty.c_iflag &= ~ICRNL;
+
     cfsetispeed(&tty, B230400);
     cfsetospeed(&tty, B230400);
-    tty.c_cflag |= CLOCAL | CREAD | CS8;
-    tty.c_cflag &= ~(PARENB | CSTOPB | CRTSCTS);
-    tty.c_iflag &= ~ICRNL;
+    tty.c_cflag &= ~CSTOPB;
+
+    // 关键：一次至少读够一个分包（11字节），降低抖动；超时100ms
     tty.c_cc[VTIME] = 1;
-    tty.c_cc[VMIN] = 1;
-    tcsetattr(fd, TCSANOW, &tty);
+    tty.c_cc[VMIN]  = 11;
+
+    tcflush(fd, TCIFLUSH);
+
+    if (tcsetattr(fd, TCSANOW, &tty) != 0) { perror("tcsetattr"); close(fd); return; }
+
 
     // 初始化 IMU 数据结构
     IMUSerial::IMUDATA current_imu;
     char chrBuf[100];
     unsigned char chrCnt = 0;
-    float G = 9.81f;
 
     // 获取 UTC 时间戳的 Lambda
     auto getUTCTimestamp = []() -> double {
@@ -137,36 +171,32 @@ void retrieveIMU() {
                 continue;
             }
 
-            // 解析数据内容
+            // 解析一个11字节小包
             signed short sData[4];
             memcpy(&sData[0], &chrBuf[2], 8);
-            double timestamp = getUTCTimestamp();
 
             switch (chrBuf[1]) {
-                case 0x51: // 加速度
-                    for (int j = 0; j < 3; j++)
-                        current_imu.a(j) = (float)sData[j] / 32768.0 * 16.0 * G;
-                    current_imu.has_acc = true;
-                    current_imu.timestamp_acc = timestamp;
-                    break;
-                case 0x52: // 陀螺仪
-                    for (int j = 0; j < 3; j++)
-                        current_imu.w(j) = (float)sData[j] / 32768.0 * 2000.0 * 3.14159 / 180.0;
-                    current_imu.has_gyro = true;
-                    current_imu.timestamp_gyro = timestamp;
-                    break;
-                case 0x53: // 姿态角
-                    for (int j = 0; j < 3; j++)
-                        current_imu.angle(j) = (float)sData[j] / 32768.0 * 180.0;
-                    current_imu.has_ang = true;
-                    current_imu.timestamp_ang = timestamp;
-                    break;
-                case 0x54: // 磁力计
-                    for (int j = 0; j < 3; j++)
-                        current_imu.h(j) = (float)sData[j];
-                    current_imu.has_h = true;
-                    current_imu.timestamp_h = timestamp;
-                    break;
+                case 0x51: { // 加速度
+                for (int j = 0; j < 3; j++)
+                    current_imu.a(j) = (float)sData[j] / 32768.0f * 16.0f * (float)G; // m/s^2
+                current_imu.has_acc = true;
+                } break;
+                case 0x52: { // 角速度（dps）
+                for (int j = 0; j < 3; j++)
+                    current_imu.w(j) = (float)sData[j] / 32768.0f * 2000.0f; // dps
+                current_imu.has_gyro = true;
+                } break;
+                case 0x53: { // 欧拉角（deg）
+                for (int j = 0; j < 3; j++)
+                    current_imu.angle(j) = (float)sData[j] / 32768.0f * 180.0f;
+                current_imu.has_ang = true;
+                } break;
+                case 0x54: { // 磁力计（原始）
+                for (int j = 0; j < 3; j++)
+                    current_imu.h(j) = (float)sData[j];
+                current_imu.has_h = true;
+                } break;
+                default: break;
             }
             chrCnt = 0;
 
@@ -174,11 +204,17 @@ void retrieveIMU() {
             if (current_imu.has_acc && current_imu.has_gyro && current_imu.has_ang && current_imu.has_h) {
                 writeIMUFrameCSV(current_imu, current_imu.timestamp_acc);
 
+                const double t_last   = now_mono_raw();
+                const double t_sample = t_last - 0.5 * T_tx;
+
                 ov_core::ImuData message;
-                message.timestamp = current_imu.timestamp_acc;
-                message.wm << double(current_imu.w.x()), double(current_imu.w.y()), double(current_imu.w.z());
-                message.am << double(current_imu.a.x()), double(current_imu.a.y()), double(current_imu.a.z());
-                message.hm << double(current_imu.h.x()), double(current_imu.h.y()), double(current_imu.h.z());
+                message.timestamp = t_sample; // 统一 MONOTONIC_RAW 时基
+                // gyro: dps -> rad/s
+                message.wm << (double)current_imu.w.x(), (double)current_imu.w.y(), (double)current_imu.w.z();
+                message.wm *= M_PI / 180.0;
+                message.am << (double)current_imu.a.x(), (double)current_imu.a.y(), (double)current_imu.a.z();
+                message.hm << (double)current_imu.h.x(), (double)current_imu.h.y(), (double)current_imu.h.z();
+
                 message.Rm = IMUSerial::rpy2R(current_imu.angle).cast<double>();
 
                 // 发布 IMU 数据和姿态
@@ -276,10 +312,7 @@ void retrieveCamera() {
 
     // 打开视频设备
     int fd = open(device_path.c_str(), O_RDWR);
-    if (fd == -1) {
-        perror("open /dev/video73");
-        return;
-    }
+    if (fd == -1) { perror("open /dev/video"); return; }
 
     // 设置视频格式
     v4l2_format fmt = {};
@@ -288,57 +321,91 @@ void retrieveCamera() {
     fmt.fmt.pix.height = HEIGHT;
     fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
     fmt.fmt.pix.field = V4L2_FIELD_NONE;
-    ioctl(fd, VIDIOC_S_FMT, &fmt);
+    if (ioctl(fd, VIDIOC_S_FMT, &fmt) == -1) { perror("VIDIOC_S_FMT"); close(fd); return; }
 
-    // 请求缓冲区
-    v4l2_requestbuffers req = {};
+    // ===== 申请缓冲并 mmap =====
+    v4l2_requestbuffers req{};
     req.count = BUFFER_COUNT;
     req.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     req.memory = V4L2_MEMORY_MMAP;
-    ioctl(fd, VIDIOC_REQBUFS, &req);
+    if (ioctl(fd, VIDIOC_REQBUFS, &req) == -1) { perror("VIDIOC_REQBUFS"); close(fd); return; }
 
-    Buffer buffers[BUFFER_COUNT];
+    struct Buffer { void* start; size_t length; } buffers[BUFFER_COUNT];
     for (int i = 0; i < BUFFER_COUNT; ++i) {
-        v4l2_buffer buf = {};
+        v4l2_buffer buf{};
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
         buf.index = i;
-        ioctl(fd, VIDIOC_QUERYBUF, &buf);
+        if (ioctl(fd, VIDIOC_QUERYBUF, &buf) == -1) { perror("VIDIOC_QUERYBUF"); close(fd); return; }
 
         buffers[i].length = buf.length;
         buffers[i].start = mmap(NULL, buf.length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, buf.m.offset);
-        ioctl(fd, VIDIOC_QBUF, &buf);
+        if (buffers[i].start == MAP_FAILED) { perror("mmap"); close(fd); return; }
+
+        if (ioctl(fd, VIDIOC_QBUF, &buf) == -1) { perror("VIDIOC_QBUF"); close(fd); return; }
     }
 
-    // 开启视频流
     int type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    ioctl(fd, VIDIOC_STREAMON, &type);
+    if (ioctl(fd, VIDIOC_STREAMON, &type) == -1) { perror("VIDIOC_STREAMON"); close(fd); return; }
 
-    // 时间同步偏移计算（MONO->UTC）
-    struct timespec ts_realtime, ts_mono;
-    clock_gettime(CLOCK_REALTIME, &ts_realtime);
-    clock_gettime(CLOCK_MONOTONIC, &ts_mono);
-    double offset = (ts_realtime.tv_sec + ts_realtime.tv_nsec / 1e9) - (ts_mono.tv_sec + ts_mono.tv_nsec / 1e9);
+    // ===== 建立 MONOTONIC -> MONOTONIC_RAW 的一次性偏移映射（把相机戳映射到 RAW）=====
+    timespec ts_raw{}, ts_mono{};
+    clock_gettime(CLOCK_MONOTONIC_RAW, &ts_raw);
+    clock_gettime(CLOCK_MONOTONIC,     &ts_mono);
+    const double offset_raw_minus_mono =
+        (ts_raw.tv_sec + ts_raw.tv_nsec * 1e-9) - (ts_mono.tv_sec + ts_mono.tv_nsec * 1e-9);
+
+    // ===== 统计真实采集帧率（基于 V4L2 采集戳）=====
+    // 用驱动戳（MONOTONIC）计算瞬时 FPS，再映射到 RAW 做全局统一（不影响差分）
+    double last_cam_time_mono = -1.0;
+    double ema_fps = -1.0;                 // 指数滑动平均 FPS
+    const double ema_alpha = 0.20;         // EMA平滑系数，可调 0.1~0.3
+    uint64_t frames_counted = 0;
+
+    // ===== 处理耗时统计 =====
+    static double sum_time = 0.0;
+    static int count = 0;
 
     // 图像采集循环
     while (true) {
-        v4l2_buffer buf = {};
+        v4l2_buffer buf{};
         buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         buf.memory = V4L2_MEMORY_MMAP;
-        ioctl(fd, VIDIOC_DQBUF, &buf);
 
-        // 计算图像 UTC 时间
-        double v4l2_time = buf.timestamp.tv_sec + buf.timestamp.tv_usec / 1e6;
-        double utc_time = v4l2_time + offset;
+        if (ioctl(fd, VIDIOC_DQBUF, &buf) == -1) { perror("VIDIOC_DQBUF"); break; }
 
-        vector<uchar> data((uchar*)buffers[buf.index].start,
-                           (uchar*)buffers[buf.index].start + buf.bytesused);
+        // ---- 关键：驱动采集完成时刻（通常 MONOTONIC）----
+        const double cam_time_mono = buf.timestamp.tv_sec + buf.timestamp.tv_usec * 1e-6;
+
+        // ---- 采集频率统计（真实 fps）----
+        if (last_cam_time_mono > 0.0) {
+        double dt = cam_time_mono - last_cam_time_mono;          // 相邻两帧采集时间差
+        if (dt > 0.0) {
+            double inst_fps = 1.0 / dt;                            // 瞬时 FPS
+            if (ema_fps < 0.0) ema_fps = inst_fps;                 // 初始化
+            else               ema_fps = ema_alpha * inst_fps + (1.0 - ema_alpha) * ema_fps;
+
+            // 每隔一定帧打印统计（比如每30帧）
+            if ((++frames_counted % 30) == 0) {
+            printf("[V4L2] Instant FPS: %.3f | EMA FPS: %.3f (dt=%.3f ms)\n",
+                        inst_fps, ema_fps, dt * 1000.0);
+            }
+        }
+        }
+        last_cam_time_mono = cam_time_mono;
+
+        // ---- 映射到 RAW 时基（与 IMU 统一）----
+        const double cam_time_raw = cam_time_mono + offset_raw_minus_mono;
+
+        // ---- 解码 MJPEG ----
+        std::vector<uchar> data((uchar*)buffers[buf.index].start,
+                                (uchar*)buffers[buf.index].start + buf.bytesused);
         cv::Mat full = cv::imdecode(data, cv::IMREAD_COLOR);
 
         if (!full.empty() && full.cols == WIDTH && full.rows == HEIGHT) {
             ov_core::CameraData image_msg;
             image_msg.images.resize(2);
-            image_msg.timestamp = utc_time;
+            image_msg.timestamp = cam_time_raw;
             image_msg.images[0] = full(cv::Rect(0, 0, WIDTH / 2, HEIGHT)).clone();
             image_msg.images[1] = full(cv::Rect(WIDTH / 2, 0, WIDTH / 2, HEIGHT)).clone();
 
@@ -347,7 +414,7 @@ void retrieveCamera() {
 
             if (is_record_camera == 2) {
                 std::ostringstream oss;
-                oss << std::fixed << std::setprecision(6) << utc_time;
+                oss << std::fixed << std::setprecision(6) << image_msg.timestamp;
                 std::string timestamp_str = oss.str();
 
                 std::string left_path = left_images_dir + "/" + timestamp_str + ".png";
@@ -364,7 +431,7 @@ void retrieveCamera() {
 
             // print_memory_usage();
             ioctl(fd, VIDIOC_QBUF, &buf); // 重新排队该缓冲区
-            usleep(10); // 微小延迟
+            usleep(1); // 微小延迟
 
             if (is_record_camera == 1) {
                 if (thread_update_running)
@@ -377,7 +444,7 @@ void retrieveCamera() {
         } else {
             cerr << "图像解码失败或尺寸错误" << endl;
             ioctl(fd, VIDIOC_QBUF, &buf); // 重新排队该缓冲区
-            usleep(10); // 微小延迟
+            usleep(1); // 微小延迟
         }
     }
 
@@ -387,8 +454,6 @@ void retrieveCamera() {
     }
     close(fd);
 }
-
-
 
 // 主函数
 int main(int argc, char **argv) {

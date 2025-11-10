@@ -1,6 +1,6 @@
 %YAML:1.0 # need to specify the file type at the top!
 
-verbosity: "INFO" # ALL, OVDEBUG, INFO, WARNING, ERROR, SILENT
+verbosity: "INFO" # ALL, DEBUG, INFO, WARNING, ERROR, SILENT
 
 use_fej: true # if first-estimate Jacobians should be used (enable for good consistency)
 integration: "discrete" # discrete, rk4, analytical (if rk4 or analytical used then analytical covariance propagation is used)
@@ -13,7 +13,7 @@ calib_cam_timeoffset: true # if timeoffset between camera and IMU should be opti
 calib_imu_intrinsics: false # if imu intrinsics should be calibrated (rotation and skew-scale matrix)
 calib_imu_g_sensitivity: false # if gyroscope gravity sensitivity (Tg) should be calibrated
 
-max_clones: 15 # how many clones in the sliding window
+max_clones: 10 # how many clones in the sliding window
 max_slam: 50 # number of features in our state vector
 max_slam_in_update: 25 # update can be split into sequential updates of batches, how many in a batch
 max_msckf_in_update: 40 # how many MSCKF features to use in the update
@@ -75,20 +75,8 @@ filepath_gt: "/tmp/ov_groundtruth.txt"
 # ==================================================================
 # ==================================================================
 
-# # our front-end feature tracking parameters
-# # we have a KLT and descriptor based (KLT is better implemented...)
-# use_klt: true # if true we will use KLT, otherwise use a ORB descriptor + robust matching
-# num_pts: 200 # number of points (per camera) we will extract and try to track
-# fast_threshold: 20 # threshold for fast extraction (warning: lower threshs can be expensive)
-# grid_x: 5 # extraction sub-grid count for horizontal direction (uniform tracking)
-# grid_y: 5 # extraction sub-grid count for vertical direction (uniform tracking)
-# min_px_dist: 10 # distance between features (features near each other provide less information)
-# knn_ratio: 0.70 # descriptor knn threshold for the top two descriptor matches
-# track_frequency: 15.0 # frequency we will perform feature tracking at (in frames per second / hertz)
-# downsample_cameras: false # will downsample image in half if true
-# num_opencv_threads: 4 # -1: auto, 0-1: serial, >1: number of threads
-# histogram_method: "HISTOGRAM" # NONE, HISTOGRAM, CLAHE
-
+# our front-end feature tracking parameters
+# we have a KLT and descriptor based (KLT is better implemented...)
 use_klt: true # if true we will use KLT, otherwise use a ORB descriptor + robust matching
 num_pts: 200 # number of points (per camera) we will extract and try to track
 fast_threshold: 30 # threshold for fast extraction (warning: lower threshs can be expensive)
@@ -96,10 +84,10 @@ grid_x: 5 # extraction sub-grid count for horizontal direction (uniform tracking
 grid_y: 5 # extraction sub-grid count for vertical direction (uniform tracking)
 min_px_dist: 15 # distance between features (features near each other provide less information)
 knn_ratio: 0.70 # descriptor knn threshold for the top two descriptor matches
-track_frequency: 25.0 # frequency we will perform feature tracking at (in frames per second / hertz)
-downsample_cameras: true # will downsample image in half if true
+track_frequency: 20.0 # frequency we will perform feature tracking at (in frames per second / hertz)
+downsample_cameras: false # will downsample image in half if true
 num_opencv_threads: 4 # -1: auto, 0-1: serial, >1: number of threads
-histogram_method: "HISTOGRAM" # NONE, HISTOGRAM, CLAHE
+histogram_method: "CLAHE" # NONE, HISTOGRAM, CLAHE
 
 # aruco tag tracker for the system
 # DICT_6X6_1000 from https://chev.me/arucogen/
@@ -111,15 +99,17 @@ downsize_aruco: true
 # ==================================================================
 
 # camera noises and chi-squared threshold multipliers
-up_msckf_sigma_px: 1.5
-up_msckf_chi2_multipler: 1.5
-up_slam_sigma_px: 1.5
-up_slam_chi2_multipler: 1.5
-up_aruco_sigma_px: 1.5
-up_aruco_chi2_multipler: 1.5
+up_msckf_sigma_px: 2
+up_msckf_chi2_multipler: 2
+up_slam_sigma_px: 2
+up_slam_chi2_multipler: 2
+up_aruco_sigma_px: 2
+up_aruco_chi2_multipler: 2
 
 # masks for our images
-use_mask: false
+use_mask: true
+mask0: "mask_t265_cam0.png" #relative to current file
+mask1: "mask_t265_cam1.png" #relative to current file
 
 # imu and camera spacial-temporal
 # imu config should also have the correct noise values

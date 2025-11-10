@@ -30,6 +30,7 @@
 
 #include <spdlog/fmt/ostr.h>
 #include <spdlog/spdlog.h>
+#include <fmt/printf.h> 
 
 namespace ov_core {
 
@@ -104,10 +105,12 @@ void initSpdlog(std::string node_name, std::string &log_path, bool alsologtostde
 // #define PRINT_WARNING(x...) ov_core::Printer::debugPrint(ov_core::Printer::PrintLevel::WARNING, __FILE__, TOSTRING(__LINE__), x);
 // #define PRINT_ERROR(x...) ov_core::Printer::debugPrint(ov_core::Printer::PrintLevel::ERROR, __FILE__, TOSTRING(__LINE__), x);
 
-#define PRINT_ALL(...) SPDLOG_INFO(__VA_ARGS__);
-#define PRINT_DEBUG(...) SPDLOG_DEBUG(__VA_ARGS__);
-#define PRINT_INFO(...) SPDLOG_INFO(__VA_ARGS__);
-#define PRINT_WARNING(...) SPDLOG_WARN(__VA_ARGS__);
-#define PRINT_ERROR(...) SPDLOG_ERROR(__VA_ARGS__);
+#define _FMT_PRINTF_TO_STRING(fmt__, ...) fmt::sprintf(fmt__, ##__VA_ARGS__)
+
+#define PRINT_ALL(fmt__, ...)      SPDLOG_INFO(_FMT_PRINTF_TO_STRING(fmt__, ##__VA_ARGS__))
+#define PRINT_DEBUG(fmt__, ...)    SPDLOG_DEBUG(_FMT_PRINTF_TO_STRING(fmt__, ##__VA_ARGS__))
+#define PRINT_INFO(fmt__, ...)     SPDLOG_INFO(_FMT_PRINTF_TO_STRING(fmt__, ##__VA_ARGS__))
+#define PRINT_WARNING(fmt__, ...)  SPDLOG_WARN(_FMT_PRINTF_TO_STRING(fmt__, ##__VA_ARGS__))
+#define PRINT_ERROR(fmt__, ...)    SPDLOG_ERROR(_FMT_PRINTF_TO_STRING(fmt__, ##__VA_ARGS__))
 
 #endif /* OV_CORE_PRINT_H */

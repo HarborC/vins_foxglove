@@ -17,3 +17,15 @@ install(TARGETS record_data
     LIBRARY DESTINATION lib
     RUNTIME DESTINATION bin
 )
+
+
+
+add_executable(run_msckf_rs run_msckf_rs.cpp)
+target_link_libraries(run_msckf_rs ${PROJECT_NAME} ${thirdparty_libraries})
+target_compile_definitions(run_msckf_rs PRIVATE PROJ_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../")
+
+install(TARGETS run_msckf_rs
+    ARCHIVE DESTINATION lib
+    LIBRARY DESTINATION lib
+    RUNTIME DESTINATION bin
+)
