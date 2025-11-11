@@ -15,6 +15,8 @@
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/filesystem.hpp>
 #include <foxglove/visualizer.h>
+#include <ceres/ceres.h>
+#include <ceres/rotation.h>
 
 #include "foxglove/dash_board.h"  // 可视化仪表板模块
 #include "serial_imu/IImuDriver.h"   // IMU 驱动接口
@@ -174,6 +176,89 @@ public:
 
   // 启动 / 停止 姿态发送线程
   void startPoseThread();
+
+  // AprilGrid检测和PnP定位相关函数
+  void startAprilGridLocalization();
+  void aprilGridDetectionThread();
+  bool solveStereoPnP(const std::vector<cv::Point2f>& left_points,
+                      const std::vector<cv::Point2f>& right_points,
+                      const std::vector<cv::Point3f>& object_points,
+                      const cv::Mat& K_left, const cv::Mat& D_left,
+                      const cv::Mat& K_right, const cv::Mat& D_right,
+                      const cv::Mat& R_lr, const cv::Mat& t_lr,
+                      Eigen::Matrix4d& T_grid_to_imu);
+
+  // AprilGrid检测相关成员变量
+  std::atomic<bool> april_grid_running_{false};
+  std::thread april_grid_thread_;
+  std::shared_ptr<CAMERA_CALIB::AprilGrid> april_grid_;
+  std::deque<ov_core::CameraData> april_grid_image_queue_;
+  std::mutex april_grid_queue_mtx_;
+  std::condition_variable april_grid_cv_;
+  size_t april_grid_queue_max_ = 10; // 限制队列长度
+
+  // PnP定位结果轨迹
+  std::deque<std::pair<double, Eigen::Matrix4f>> april_grid_poses_;
+  std::mutex april_grid_poses_mtx_;
+
+  // ========== Ceres AprilGrid位姿优化器 ==========
+
+  // 简化的重投影误差代价函数
+  class ReprojectionError {
+  public:
+    ReprojectionError(const Eigen::Vector2d& point2d,
+                      const Eigen::Vector3d& point3d,
+                      const Eigen::Matrix4d& T_ci)
+      : point2d_(point2d), point3d_(point3d), T_ci_(T_ci) {}
+
+    template <typename T>
+    bool operator()(const T* const pose_q, const T* const pose_t, T* residuals) const {
+      T q[4] = {pose_q[0], pose_q[1], pose_q[2], pose_q[3]};
+      T t[3] = {pose_t[4], pose_t[5], pose_t[6]};
+
+      Eigen::Map<Eigen::Quaternion<T>> q_iw(q);
+      Eigen::Matrix<T,3,1> t_iw(t[0], t[1], t[2]);
+
+      Eigen::Quaternion<T> q_cw = Eigen::Quaternion<T>(T_ci_.block<3,3>(0,0).cast<T>()) * q_iw;
+      Eigen::Matrix<T,3,1> t_cw = Eigen::Matrix<T,3,1>(T_ci_.block<3,1>(0,3).cast<T>()) + q_cw * t_iw;
+
+      Eigen::Matrix<T,3,1> point_3d_T = point3d_.cast<T>();
+      Eigen::Matrix<T,3,1> point_in_c = q_cw * point_3d_T + t_cw;
+
+      if (point_in_c(2) <= T(0)) {
+        return false;
+      }
+
+      residuals[0] = point_in_c(0) / point_in_c(2) - T(point2d_(0));
+      residuals[1] = point_in_c(1) / point_in_c(2) - T(point2d_(1));
+
+      return true;
+    }
+
+  private:
+    Eigen::Vector2d point2d_;
+    Eigen::Vector3d point3d_;
+    Eigen::Matrix4d T_ci_;
+  };
+
+  // Ceres优化器函数
+  bool optimizeIMUPoseWithCeres(const std::vector<cv::Point2f>& left_points_norm,
+                               const std::vector<cv::Point2f>& right_points_norm,
+                               const std::vector<cv::Point3f>& object_points,
+                               const Eigen::Matrix4d& T_ItoC_left,
+                               const Eigen::Matrix4d& T_ItoC_right,
+                               Eigen::Matrix4d& T_grid_to_imu);
+
+  // 坐标转换辅助函数
+  cv::Point2f pixelToNormalized(const cv::Point2f& pixel, const cv::Mat& K);
+  std::vector<cv::Point2f> pixelsToNormalized(const std::vector<cv::Point2f>& pixels, const cv::Mat& K);
+
+  Eigen::Matrix4d poseCeresToMatrix(const double* pose) const;
+  void matrixToPoseCeres(const Eigen::Matrix4d& T, double* pose) const;
+
+  // 成员变量
+  bool ceres_optimizer_enabled_ = true;
+  double ceres_initial_pose_[7] = {1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // 初始位姿 [qw,qx,qy,qz,tx,ty,tz]
 };
 
 } // namespace ov_msckf
