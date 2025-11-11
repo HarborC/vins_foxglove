@@ -222,10 +222,13 @@ public:
         point2d_.y() = point2d.y() - cam_params[3];
       }
 
+    // 注意：此处使用 EigenQuaternionParameterization，对应存储顺序为 [x,y,z,w]
     template <typename T>
     bool operator()(const T* const pose_q, const T* const pose_t, T* residuals) const {
+      // pose_q: [x,y,z,w]  -> 构造 Eigen::Quaternion(w,x,y,z)
       Eigen::Quaternion<T> q_iw(pose_q[3], pose_q[0], pose_q[1], pose_q[2]);
-      Eigen::Matrix<T,3,1> t_iw(pose_t[4], pose_t[5], pose_t[6]);
+      // pose_t: [tx,ty,tz]
+      Eigen::Matrix<T,3,1> t_iw(pose_t[0], pose_t[1], pose_t[2]);
 
       Eigen::Quaternion<T> q_cw = Eigen::Quaternion<T>(T_ci_.block<3,3>(0,0).cast<T>()) * q_iw;
       Eigen::Matrix<T,3,1> t_cw = Eigen::Matrix<T,3,1>(T_ci_.block<3,1>(0,3).cast<T>()) + q_cw * t_iw;

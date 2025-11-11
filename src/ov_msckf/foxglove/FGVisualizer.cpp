@@ -22,6 +22,7 @@
 #include <iostream>
 #include <linux/videodev2.h>
 #include <opencv2/opencv.hpp>
+#include <cmath>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -998,7 +999,8 @@ void FGVisualizer::aprilGridDetectionThread() {
       continue;
     }
 
-    PRINT_INFO("AprilGrid detection thread processing frame at timestamp: %.6f\n", cam_data.timestamp);
+    PRINT_DEBUG("[APRIL_GRID] processing ts=%.6f size=%dx%d\n",
+                cam_data.timestamp, cam_data.images[0].cols, cam_data.images[0].rows);
 
 
     // 检测AprilGrid - 左右相机
@@ -1009,12 +1011,10 @@ void FGVisualizer::aprilGridDetectionThread() {
       PRINT_ERROR("AprilGrid left image is empty.\n");
     }
 
-    PRINT_INFO("AprilGrid image size: %dx%d\n", cam_data.images[0].cols, cam_data.images[0].rows);
-
     detector.detectTags(cam_data.images[0], corners_left_good.corners, corners_left_good.corner_ids, corners_left_good.radii,
                         corners_left_bad.corners, corners_left_bad.corner_ids, corners_left_bad.radii);
 
-    PRINT_INFO("AprilGrid detection thread processing frame at timestamp: %.6f\n", cam_data.timestamp);
+  PRINT_DEBUG("[APRIL_GRID] tags detection for right image ts=%.6f\n", cam_data.timestamp);
 
     detector.detectTags(cam_data.images[1], corners_right_good.corners, corners_right_good.corner_ids, corners_right_good.radii,
                         corners_right_bad.corners, corners_right_bad.corner_ids, corners_right_bad.radii);
@@ -1029,6 +1029,10 @@ void FGVisualizer::aprilGridDetectionThread() {
     std::vector<Eigen::Vector2d> point2d_left_normalized;
     std::vector<Eigen::Vector3d> point3d_left;
     auto intrinsic_left = _app->get_state()->_cam_intrinsics_cameras.at(0);
+    if (!intrinsic_left) {
+      PRINT_DEBUG("[APRIL_GRID] left intrinsics not ready, skip\n");
+      continue;
+    }
     cv::Matx33d K_left_cv = intrinsic_left->get_K();
     std::vector<double> cam_left;
     cam_left.push_back(K_left_cv(0, 0)); // fx
@@ -1048,6 +1052,10 @@ void FGVisualizer::aprilGridDetectionThread() {
     std::vector<Eigen::Vector2d> point2d_right_normalized;
     std::vector<Eigen::Vector3d> point3d_right;
     auto intrinsic_right = _app->get_state()->_cam_intrinsics_cameras.at(1);
+    if (!intrinsic_right) {
+      PRINT_DEBUG("[APRIL_GRID] right intrinsics not ready, skip\n");
+      continue;
+    }
     cv::Matx33d K_right_cv = intrinsic_right->get_K();
     std::vector<double> cam_right;
     cam_right.push_back(K_right_cv(0, 0)); // fx
@@ -1093,7 +1101,8 @@ void FGVisualizer::aprilGridDetectionThread() {
       
     }
 
-    PRINT_INFO("AprilGrid detected: left tags=%zu, right tags=%zu\n", corners_left_good.corner_ids.size(), corners_right_good.corner_ids.size());
+    PRINT_DEBUG("[APRIL_GRID] detected tags: L=%zu R=%zu\n",
+                corners_left_good.corner_ids.size(), corners_right_good.corner_ids.size());
 
     Eigen::Matrix4d T_grid_to_cam, T_grid_to_imu;
     if (solvePnP(point2d_left_normalized, point3d_left, cam_left, T_grid_to_cam)) {
@@ -1106,7 +1115,7 @@ void FGVisualizer::aprilGridDetectionThread() {
       continue; 
     }
 
-    PRINT_INFO("AprilGrid PnP pose estimated.\n");
+    PRINT_DEBUG("[APRIL_GRID] PnP pose estimated\n");
 
     // 准备用ceres解算新的pose
     bool is_success = optimizeIMUPoseWithCeres(point2d_left_normalized, point2d_right_normalized, 
@@ -1119,11 +1128,14 @@ void FGVisualizer::aprilGridDetectionThread() {
     T_imu_to_grid.block(0,3,3,1) = -T_imu_to_grid.block(0,0,3,3) * T_grid_to_imu.block(0,3,3,1);
     Eigen::Matrix4f T_imu_to_grid_f = T_imu_to_grid.cast<float>();
 
-    Eigen::Matrix4f T_local_grid = cam_data.T_local_imu * T_imu_to_grid_f.inverse();
+    // 注意：T_local_grid = T_local_imu * T_imu_to_grid（不需要再取逆）
+    Eigen::Matrix4f T_local_grid = cam_data.T_local_imu * T_imu_to_grid_f;
 
     _viz->showPose("april_grid_pose", int64_t(cam_data.timestamp*1e6), T_imu_to_grid_f, "APRIL_GRID", "IMU2");
     _viz->showPose("april_local_grid_pose", int64_t(cam_data.timestamp*1e6), T_local_grid, "LOCAL", "APRIL_GRID");
-    PRINT_DEBUG("[APRIL_GRID] pose updated tags=%zu inliers=%d err=%.2f\n", tag_corners_ref.size(), inliers.rows, avg_err);
+    PRINT_DEBUG("[APRIL_GRID] pose updated L=%zu R=%zu right_err=%.2f px%s\n",
+                corners_left_good.corner_ids.size(), corners_right_good.corner_ids.size(),
+                avg_err_right, is_success? ", ceres_ok":"");
   }
 
   PRINT_INFO("AprilGrid detection thread stopped\n");
@@ -1151,7 +1163,7 @@ bool FGVisualizer::solvePnP(const std::vector<Eigen::Vector2d>& points2d,
                                         0, cam_params[1], cam_params[3],
                                         0, 0, 1);
 
-  PRINT_INFO("solvePnP: points2d=%zu, points3d=%zu\n", points2d.size(), points3d.size());
+  PRINT_DEBUG("solvePnP: points2d=%zu, points3d=%zu\n", points2d.size(), points3d.size());
 
   // 将输入点转换为cv::Mat格式
   std::vector<cv::Point2f> cv_points2d;
@@ -1163,7 +1175,7 @@ bool FGVisualizer::solvePnP(const std::vector<Eigen::Vector2d>& points2d,
     cv_points3d.emplace_back(static_cast<float>(pt.x()), static_cast<float>(pt.y()), static_cast<float>(pt.z()));
   }
 
-  PRINT_INFO("solvePnP: cv_points2d=%zu, cv_points3d=%zu\n", cv_points2d.size(), cv_points3d.size());
+  PRINT_DEBUG("solvePnP: cv_points2d=%zu, cv_points3d=%zu\n", cv_points2d.size(), cv_points3d.size());
 
   // points2d是归一化平面坐标
   bool success = cv::solvePnPRansac(cv_points3d, cv_points2d, K, cv::Mat::zeros(4, 1, CV_64F),
@@ -1205,17 +1217,24 @@ bool FGVisualizer::optimizeIMUPoseWithCeres(const std::vector<Eigen::Vector2d>& 
   ceres::Problem problem;
   ceres::LossFunction* loss_function = new ceres::HuberLoss(1.0); // 鲁棒损失函数是不是有问题
 
-  // 初始IMU位姿参数 - 根据ReprojectionError operator()的期望格式
-  // pose_q[0-3]: 四元数 [qw, qx, qy, qz]
-  // pose_t[0-2]: 3个参数，其中pose_t[0-2]用于平移 [tx, ty, tz]
+  // 初始IMU位姿参数
+  // 使用 EigenQuaternionParameterization: 四元数内存布局 [x,y,z,w]
+  // pose_q[0-3]: [qx, qy, qz, qw]
+  // pose_t[0-2]: 平移 [tx, ty, tz]
   double pose_q[4];
   double pose_t[3] = {0, 0, 0}; // 前4个参数预留，使用后3个存储平移
 
   // 从当前T_grid_to_imu矩阵初始化参数
-  Eigen::Matrix3d R_init = T_grid_to_imu.block(0, 0, 3, 3);
+  Eigen::Matrix3d R_init = T_grid_to_imu.block<3,3>(0, 0);
   Eigen::Quaterniond q_init(R_init);
-  pose_q[3] = q_init.w(); pose_q[0] = q_init.x(); pose_q[1] = q_init.y(); pose_q[2] = q_init.z();
-  pose_t[0] = T_grid_to_imu(0, 3); pose_t[1] = T_grid_to_imu(1, 3); pose_t[2] = T_grid_to_imu(2, 3);
+  // 存储为 [x,y,z,w]
+  pose_q[0] = q_init.x();
+  pose_q[1] = q_init.y();
+  pose_q[2] = q_init.z();
+  pose_q[3] = q_init.w();
+  pose_t[0] = T_grid_to_imu(0, 3);
+  pose_t[1] = T_grid_to_imu(1, 3);
+  pose_t[2] = T_grid_to_imu(2, 3);
 
   // 添加左相机重投影误差约束
   for (size_t i = 0; i < left_points2d.size() && i < left_points3d.size(); i++) {
@@ -1243,7 +1262,8 @@ bool FGVisualizer::optimizeIMUPoseWithCeres(const std::vector<Eigen::Vector2d>& 
     problem.AddResidualBlock(cost_function, loss_function, pose_q, pose_t);
   }
 
-  // 添加四元数参数化约束（确保四元数是单位四元数）
+  // 添加四元数参数化约束（确保单位四元数）
+  // 使用 EigenQuaternionParameterization（期望 [x,y,z,w] 布局）
   ceres::LocalParameterization* quaternion_parameterization = new ceres::EigenQuaternionParameterization;
   problem.SetParameterization(pose_q, quaternion_parameterization);
 
@@ -1258,10 +1278,10 @@ bool FGVisualizer::optimizeIMUPoseWithCeres(const std::vector<Eigen::Vector2d>& 
   ceres::Solver::Summary summary;
   ceres::Solve(options, &problem, &summary);
 
-  // 从优化后的参数更新变换矩阵
-  Eigen::Quaterniond q_optimized(pose_q[0], pose_q[1], pose_q[2], pose_q[3]);
-  T_grid_to_imu.block(0, 0, 3, 3) = q_optimized.toRotationMatrix();
-  T_grid_to_imu.block(0, 3, 3, 1) = Eigen::Vector3d(pose_t[4], pose_t[5], pose_t[6]);
+  // 从优化后的参数更新变换矩阵（从 [x,y,z,w] 还原 Eigen::Quaterniond(w,x,y,z)）
+  Eigen::Quaterniond q_optimized(pose_q[3], pose_q[0], pose_q[1], pose_q[2]);
+  T_grid_to_imu.block<3,3>(0, 0) = q_optimized.toRotationMatrix();
+  T_grid_to_imu.block<3,1>(0, 3) = Eigen::Vector3d(pose_t[0], pose_t[1], pose_t[2]);
 
   PRINT_DEBUG("[CERES_OPTIM] Pose optimization: %s, final cost: %.6f, iterations: %d\n",
              summary.BriefReport().c_str(), summary.final_cost, (int)summary.iterations.size());
