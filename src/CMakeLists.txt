@@ -52,6 +52,7 @@ target_include_directories(${PROJECT_NAME} PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/ov_sensors>
   $<INSTALL_INTERFACE:include/${PROJECT_NAME}>
 )
+target_compile_definitions(${PROJECT_NAME} PRIVATE PROJ_DIR="${CMAKE_CURRENT_SOURCE_DIR}/../")
 
 install(TARGETS ${PROJECT_NAME}
   ARCHIVE DESTINATION lib

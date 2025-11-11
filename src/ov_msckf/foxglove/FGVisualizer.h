@@ -21,6 +21,7 @@
 #include "foxglove/dash_board.h"  // 可视化仪表板模块
 #include "serial_imu/IImuDriver.h"   // IMU 驱动接口
 #include "camera_v4l2/ICameraDriver.h" // 相机驱动接口
+#include "calibration/aprilgrid.h"
 
 // ========== 命名空间定义 ==========
 
@@ -37,6 +38,19 @@ class Simulator;
 
 // 可视化主类定义
 class FGVisualizer {
+public:
+  struct OdometryData {
+    /// Timestamp of the reading
+    double timestamp;
+
+    /// Camera ids for each of the images collected
+    std::vector<int> sensor_ids;
+
+    /// Raw image we have collected for each camera
+    std::vector<cv::Mat> images;
+
+    Eigen::Matrix4f T_local_imu; // 相机时基下的 IMU 位姿
+  };
 public:
   // 构造函数，传入 VIO 管理器与可选模拟器
   FGVisualizer(std::shared_ptr<VioManager> app, std::shared_ptr<Simulator> sim = nullptr);
@@ -180,26 +194,19 @@ public:
   // AprilGrid检测和PnP定位相关函数
   void startAprilGridLocalization();
   void aprilGridDetectionThread();
-  bool solveStereoPnP(const std::vector<cv::Point2f>& left_points,
-                      const std::vector<cv::Point2f>& right_points,
-                      const std::vector<cv::Point3f>& object_points,
-                      const cv::Mat& K_left, const cv::Mat& D_left,
-                      const cv::Mat& K_right, const cv::Mat& D_right,
-                      const cv::Mat& R_lr, const cv::Mat& t_lr,
-                      Eigen::Matrix4d& T_grid_to_imu);
+  bool solvePnP(const std::vector<Eigen::Vector2d>& points2d,
+                const std::vector<Eigen::Vector3d>& points3d,
+                const std::vector<double>& cam_params,
+                Eigen::Matrix4d& T_grid_to_cam);
 
   // AprilGrid检测相关成员变量
   std::atomic<bool> april_grid_running_{false};
   std::thread april_grid_thread_;
   std::shared_ptr<CAMERA_CALIB::AprilGrid> april_grid_;
-  std::deque<ov_core::CameraData> april_grid_image_queue_;
+  std::deque<OdometryData> april_grid_image_queue_;
   std::mutex april_grid_queue_mtx_;
   std::condition_variable april_grid_cv_;
   size_t april_grid_queue_max_ = 10; // 限制队列长度
-
-  // PnP定位结果轨迹
-  std::deque<std::pair<double, Eigen::Matrix4f>> april_grid_poses_;
-  std::mutex april_grid_poses_mtx_;
 
   // ========== Ceres AprilGrid位姿优化器 ==========
 
@@ -208,16 +215,17 @@ public:
   public:
     ReprojectionError(const Eigen::Vector2d& point2d,
                       const Eigen::Vector3d& point3d,
+                      const std::vector<double>& cam_params,
                       const Eigen::Matrix4d& T_ci)
-      : point2d_(point2d), point3d_(point3d), T_ci_(T_ci) {}
+      : point3d_(point3d), cam_params_(cam_params), T_ci_(T_ci) {
+        point2d_.x() = point2d.x() - cam_params[2];
+        point2d_.y() = point2d.y() - cam_params[3];
+      }
 
     template <typename T>
     bool operator()(const T* const pose_q, const T* const pose_t, T* residuals) const {
-      T q[4] = {pose_q[0], pose_q[1], pose_q[2], pose_q[3]};
-      T t[3] = {pose_t[4], pose_t[5], pose_t[6]};
-
-      Eigen::Map<Eigen::Quaternion<T>> q_iw(q);
-      Eigen::Matrix<T,3,1> t_iw(t[0], t[1], t[2]);
+      Eigen::Quaternion<T> q_iw(pose_q[3], pose_q[0], pose_q[1], pose_q[2]);
+      Eigen::Matrix<T,3,1> t_iw(pose_t[4], pose_t[5], pose_t[6]);
 
       Eigen::Quaternion<T> q_cw = Eigen::Quaternion<T>(T_ci_.block<3,3>(0,0).cast<T>()) * q_iw;
       Eigen::Matrix<T,3,1> t_cw = Eigen::Matrix<T,3,1>(T_ci_.block<3,1>(0,3).cast<T>()) + q_cw * t_iw;
@@ -229,8 +237,8 @@ public:
         return false;
       }
 
-      residuals[0] = point_in_c(0) / point_in_c(2) - T(point2d_(0));
-      residuals[1] = point_in_c(1) / point_in_c(2) - T(point2d_(1));
+      residuals[0] = point_in_c(0) / point_in_c(2) * T(cam_params_[0]) - T(point2d_(0));
+      residuals[1] = point_in_c(1) / point_in_c(2) * T(cam_params_[1]) - T(point2d_(1));
 
       return true;
     }
@@ -239,26 +247,19 @@ public:
     Eigen::Vector2d point2d_;
     Eigen::Vector3d point3d_;
     Eigen::Matrix4d T_ci_;
+    std::vector<double> cam_params_;
   };
 
   // Ceres优化器函数
-  bool optimizeIMUPoseWithCeres(const std::vector<cv::Point2f>& left_points_norm,
-                               const std::vector<cv::Point2f>& right_points_norm,
-                               const std::vector<cv::Point3f>& object_points,
-                               const Eigen::Matrix4d& T_ItoC_left,
-                               const Eigen::Matrix4d& T_ItoC_right,
-                               Eigen::Matrix4d& T_grid_to_imu);
-
-  // 坐标转换辅助函数
-  cv::Point2f pixelToNormalized(const cv::Point2f& pixel, const cv::Mat& K);
-  std::vector<cv::Point2f> pixelsToNormalized(const std::vector<cv::Point2f>& pixels, const cv::Mat& K);
-
-  Eigen::Matrix4d poseCeresToMatrix(const double* pose) const;
-  void matrixToPoseCeres(const Eigen::Matrix4d& T, double* pose) const;
-
-  // 成员变量
-  bool ceres_optimizer_enabled_ = true;
-  double ceres_initial_pose_[7] = {1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0}; // 初始位姿 [qw,qx,qy,qz,tx,ty,tz]
+  bool optimizeIMUPoseWithCeres(const std::vector<Eigen::Vector2d>& left_points2d,
+                                const std::vector<Eigen::Vector2d>& right_points2d,
+                                const std::vector<Eigen::Vector3d>& left_points3d,
+                                const std::vector<Eigen::Vector3d>& right_points3d,
+                                const Eigen::Matrix4d& T_ItoC_left,
+                                const Eigen::Matrix4d& T_ItoC_right,
+                                const std::vector<double>& cam_left,
+                                const std::vector<double>& cam_right,
+                                Eigen::Matrix4d& T_grid_to_imu);
 };
 
 } // namespace ov_msckf

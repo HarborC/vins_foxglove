@@ -557,6 +557,23 @@ void FGVisualizer::startIMUDriver() {
             publish_cameras();
             visualize();
             auto t2 = boost::posix_time::microsec_clock::local_time();
+
+            if (_app->initialized()) {
+              OdometryData copy;
+              copy.timestamp = front.timestamp;
+              copy.sensor_ids = front.sensor_ids;
+              copy.images = front.images;
+              copy.T_local_imu = poses_imu_dq.back().second;
+              {
+                std::lock_guard<std::mutex> lk1(april_grid_queue_mtx_);
+                if (april_grid_image_queue_.size() >= april_grid_queue_max_) {
+                  april_grid_image_queue_.pop_front();
+                }
+                april_grid_image_queue_.push_back(std::move(copy));
+              }
+              april_grid_cv_.notify_one();
+            }
+            
             double time_slam = (t1 - t0).total_microseconds() * 1e-6;
             double time_total = (t2 - t0).total_microseconds() * 1e-6;
             _dash_board->setNameAndValue(0, "TIME", time_total);
@@ -659,20 +676,14 @@ void FGVisualizer::startCameraDriver() {
       msg.masks.emplace_back(cv::Mat::zeros(f.images[0].rows, f.images[0].cols, CV_8UC1));
       msg.masks.emplace_back(cv::Mat::zeros(f.images[1].rows, f.images[1].cols, CV_8UC1));
     }
-    std::lock_guard<std::mutex> lk(camera_queue_mtx);
-    constexpr size_t MAX_Q = 240; // ~12s @20Hz
-    if (camera_queue.size() >= MAX_Q) camera_queue.pop_front();
-    camera_queue.push_back(std::move(msg));
 
-    // 推送到AprilGrid检测队列
+    // 再入主业务队列（可 move）
     {
-      std::lock_guard<std::mutex> lk2(april_grid_queue_mtx_);
-      if (april_grid_image_queue_.size() >= april_grid_queue_max_) {
-        april_grid_image_queue_.pop_front();
-      }
-      april_grid_image_queue_.push_back(msg.clone()); // 复制一份给AprilGrid检测
+      std::lock_guard<std::mutex> lk(camera_queue_mtx);
+      constexpr size_t MAX_Q = 240; // ~12s @20Hz
+      if (camera_queue.size() >= MAX_Q) camera_queue.pop_front();
+      camera_queue.push_back(std::move(msg));
     }
-    april_grid_cv_.notify_one();
   });
   if (!cam_driver_->start()) {
     PRINT_ERROR("Camera driver start failed.\n");
@@ -939,15 +950,6 @@ void FGVisualizer::publish_images() {
   cv::resize(img_history, img_history_downsampled, cv::Size(img_history.cols / 2, img_history.rows / 2));
 
   _viz->showImage("track_images", time_us, img_history_downsampled, "STEREO", true);
-
-  // 同时发布AprilGrid定位结果
-  {
-    std::lock_guard<std::mutex> lk(april_grid_poses_mtx_);
-    if (!april_grid_poses_.empty()) {
-      auto& latest_pose = april_grid_poses_.back();
-      _viz->showPose("april_grid_pose", int64_t(latest_pose.first * 1e6), latest_pose.second, "LOCAL_WORLD", "APRIL_GRID");
-    }
-  }
 }
 
 // AprilGrid检测和PnP定位实现
@@ -969,10 +971,13 @@ void FGVisualizer::aprilGridDetectionThread() {
   PRINT_INFO("AprilGrid detection thread running...\n");
 
   const int numTags = april_grid_->getTagCols() * april_grid_->getTagRows();
+  PRINT_INFO("AprilGrid detection thread initialized with %d tags.\n", numTags);
   CAMERA_CALIB::ApriltagDetector detector(numTags);
 
+  PRINT_INFO("AprilGrid detection thread ready to process images.\n");
+
   while (april_grid_running_) {
-    ov_core::CameraData cam_data;
+    OdometryData cam_data;
     {
       std::unique_lock<std::mutex> lk(april_grid_queue_mtx_);
       april_grid_cv_.wait(lk, [&] { return !april_grid_running_ || !april_grid_image_queue_.empty(); });
@@ -983,137 +988,186 @@ void FGVisualizer::aprilGridDetectionThread() {
       april_grid_image_queue_.pop_front();
     }
 
+    // 基本防御性检查
+    if (cam_data.images.size() < 2) {
+      PRINT_DEBUG("[APRIL_GRID] invalid images vector size=%zu\n", cam_data.images.size());
+      continue;
+    }
+    if (cam_data.images[0].empty() || cam_data.images[1].empty()) {
+      PRINT_DEBUG("[APRIL_GRID] empty image. L=%d R=%d\n", cam_data.images[0].empty(), cam_data.images[1].empty());
+      continue;
+    }
+
+    PRINT_INFO("AprilGrid detection thread processing frame at timestamp: %.6f\n", cam_data.timestamp);
+
+
     // 检测AprilGrid - 左右相机
     CAMERA_CALIB::CalibCornerData corners_left_good, corners_left_bad;
     CAMERA_CALIB::CalibCornerData corners_right_good, corners_right_bad;
 
+    if (cam_data.images[0].empty()) {
+      PRINT_ERROR("AprilGrid left image is empty.\n");
+    }
+
+    PRINT_INFO("AprilGrid image size: %dx%d\n", cam_data.images[0].cols, cam_data.images[0].rows);
+
     detector.detectTags(cam_data.images[0], corners_left_good.corners, corners_left_good.corner_ids, corners_left_good.radii,
                         corners_left_bad.corners, corners_left_bad.corner_ids, corners_left_bad.radii);
+
+    PRINT_INFO("AprilGrid detection thread processing frame at timestamp: %.6f\n", cam_data.timestamp);
 
     detector.detectTags(cam_data.images[1], corners_right_good.corners, corners_right_good.corner_ids, corners_right_good.radii,
                         corners_right_bad.corners, corners_right_bad.corner_ids, corners_right_bad.radii);
 
     // 检查是否有足够的角点
-    if (corners_left_good.corner_ids.size() < 3 && corners_right_good.corner_ids.size() < 3) {
+    if (corners_left_good.corner_ids.size() < 12 && corners_right_good.corner_ids.size() < 12) {
       continue; // 角点太少，跳过
     }
 
-    // ================== 1. 构建三维AprilGrid角点 ==================
-    // AprilGrid物理尺寸: tagSize, tagSpacing (center distance = tagSize*(1+tagSpacing))
-    double tagSize = april_grid_->getTagSize();      // 单标签边长 (m)
-    double tagSpacing = april_grid_->getTagSpacing();// Kalibr spacing 比例
-    int tagCols = april_grid_->getTagCols();
-    int tagRows = april_grid_->getTagRows();
-    double center_step = tagSize * (1.0 + tagSpacing);
-    double half = tagSize * 0.5;
+    double scale = (_app->get_params().downsample_cameras)? 0.5 : 1.0;
 
-    // 收集左目角点 (优先以左相机为主)
-    std::map<int,std::vector<Eigen::Vector2d>> tag_corners_left;
+    std::vector<Eigen::Vector2d> point2d_left_normalized;
+    std::vector<Eigen::Vector3d> point3d_left;
+    auto intrinsic_left = _app->get_state()->_cam_intrinsics_cameras.at(0);
+    cv::Matx33d K_left_cv = intrinsic_left->get_K();
+    std::vector<double> cam_left;
+    cam_left.push_back(K_left_cv(0, 0)); // fx
+    cam_left.push_back(K_left_cv(1, 1)); // fy
+    cam_left.push_back(K_left_cv(0, 2)); // cx
+    cam_left.push_back(K_left_cv(1, 2)); // cy
     for (size_t i=0;i<corners_left_good.corner_ids.size();++i) {
-      tag_corners_left[corners_left_good.corner_ids[i]].push_back(corners_left_good.corners[i]);
-    }
-    // 如果左目不足,使用右目
-    bool use_left = tag_corners_left.size() >= corners_right_good.corner_ids.size();
-    std::map<int,std::vector<Eigen::Vector2d>> tag_corners_ref = use_left ? tag_corners_left : std::map<int,std::vector<Eigen::Vector2d>>();
-    if (!use_left) {
-      for (size_t i=0;i<corners_right_good.corner_ids.size();++i) {
-        tag_corners_ref[corners_right_good.corner_ids[i]].push_back(corners_right_good.corners[i]);
-      }
+      int tag_id = corners_left_good.corner_ids[i];
+      point3d_left.push_back(april_grid_->aprilgrid_corner_pos_3d[tag_id].head<3>());
+      Eigen::Vector2d pt_norm = intrinsic_left->undistort_d(corners_left_good.corners[i] * scale);
+
+      Eigen::Vector2d pt_homog;
+      pt_homog << pt_norm(0) * cam_left[0] + cam_left[2], pt_norm(1) * cam_left[1] + cam_left[3];
+      point2d_left_normalized.push_back(pt_homog);
     }
 
-    std::vector<cv::Point3f> object_pts; object_pts.reserve(tag_corners_ref.size()*4);
-    std::vector<cv::Point2f> image_pts;  image_pts.reserve(tag_corners_ref.size()*4);
-    for (auto &kv : tag_corners_ref) {
-      if (kv.second.size() < 4) continue; // 需要四角
-      int tag_id = kv.first;
-      int row = tag_id / tagCols;
-      int col = tag_id % tagCols;
-      double cx = col * center_step;
-      double cy = row * center_step;
-      // 假设顺序与检测输出一致: 四个角 (-,-),(+,-),(+,+),(-,+)
-      static const std::vector<Eigen::Vector2d> obj_offsets = {
-        {-half,-half}, {half,-half}, {half,half}, {-half,half}
-      };
-      for (size_t i=0;i<4;i++) {
-        const Eigen::Vector2d &uv = kv.second[i];
-        image_pts.emplace_back((float)uv.x(), (float)uv.y());
-        object_pts.emplace_back((float)(cx + obj_offsets[i].x()), (float)(cy + obj_offsets[i].y()), 0.0f);
-      }
+    std::vector<Eigen::Vector2d> point2d_right_normalized;
+    std::vector<Eigen::Vector3d> point3d_right;
+    auto intrinsic_right = _app->get_state()->_cam_intrinsics_cameras.at(1);
+    cv::Matx33d K_right_cv = intrinsic_right->get_K();
+    std::vector<double> cam_right;
+    cam_right.push_back(K_right_cv(0, 0)); // fx
+    cam_right.push_back(K_right_cv(1, 1)); // fy
+    cam_right.push_back(K_right_cv(0, 2)); // cx
+    cam_right.push_back(K_right_cv(1, 2)); // cy
+    for (size_t i=0;i<corners_right_good.corner_ids.size();++i) {
+      int tag_id = corners_right_good.corner_ids[i];
+      point3d_right.push_back(april_grid_->aprilgrid_corner_pos_3d[tag_id].head<3>());
+
+      Eigen::Vector2d pt_norm = intrinsic_right->undistort_d(corners_right_good.corners[i] * scale);
+      Eigen::Vector2d pt_homog;
+      pt_homog << pt_norm(0) * cam_right[0] + cam_right[2], pt_norm(1) * cam_right[1] + cam_right[3];
+      point2d_right_normalized.push_back(pt_homog);
     }
-    if (object_pts.size() < 12) continue; // 至少3个tag => 12 corner
 
-    // ================== 2. 获取相机内参和外参 ==================
-    auto calib_left = _app->get_state()->_cam_intrinsics_cameras.at(0);
-    if (!calib_left) continue;
-    cv::Matx33d Kcv_left = calib_left->get_K();
-    cv::Mat K_left = (cv::Mat_<double>(3,3) << Kcv_left(0,0), 0, Kcv_left(0,2), 0, Kcv_left(1,1), Kcv_left(1,2), 0, 0, 1);
-    cv::Mat D_left = cv::Mat::zeros(1,5,CV_64F); // 假设畸变已补偿
-
-    // 相机-IMU外参: IMU->CAM, 我们需要 CAM->IMU
-    std::shared_ptr<PoseJPL> imu_to_cam = _app->get_state()->_calib_IMUtoCAM.at(0);
-    Eigen::Matrix3d R_imu_to_cam = imu_to_cam->Rot();
-    Eigen::Vector3d p_imu_in_cam = imu_to_cam->pos();
-    Eigen::Matrix3d R_cam_to_imu = R_imu_to_cam.transpose();
-    Eigen::Vector3d p_cam_in_imu = -R_cam_to_imu * p_imu_in_cam;
-
-    // ================== 3. PnP 初解 (使用当前选用的图像: 左或右) ==================
-    cv::Mat rvec, tvec; cv::Mat inliers;
-    bool ok_pnp = cv::solvePnPRansac(object_pts, image_pts, K_left, D_left, rvec, tvec,
-                                     false, 100, 8.0, 0.99, inliers, cv::SOLVEPNP_ITERATIVE);
-    if (!ok_pnp || inliers.rows < 12) continue; // 需要足够内点
-    cv::Mat Rmat; cv::Rodrigues(rvec, Rmat);
-    Eigen::Matrix3d R_grid_to_cam; for (int r=0;r<3;r++) for(int c=0;c<3;c++) R_grid_to_cam(r,c)=Rmat.at<double>(r,c);
-    Eigen::Vector3d p_grid_in_cam(tvec.at<double>(0), tvec.at<double>(1), tvec.at<double>(2));
-
-    // AprilGrid到IMU: T_grid_to_imu = T_cam_to_imu * T_grid_to_cam
-    Eigen::Matrix3d R_grid_to_imu = R_cam_to_imu * R_grid_to_cam;
-    Eigen::Vector3d p_grid_in_imu = R_cam_to_imu * p_grid_in_cam + p_cam_in_imu;
-
-    Eigen::Matrix4d T_grid_to_imu = Eigen::Matrix4d::Identity();
-    T_grid_to_imu.block<3,3>(0,0) = R_grid_to_imu;
-    T_grid_to_imu.block<3,1>(0,3) = p_grid_in_imu;
-
-    // ================== 4. 可选: 简单重投影误差评估 ==================
-    std::vector<cv::Point2f> reproj_pts;
-    cv::projectPoints(object_pts, rvec, tvec, K_left, D_left, reproj_pts);
-    double err_sum=0; int err_cnt=0;
-    for (int i=0;i<inliers.rows;i++) {
-      int idx = inliers.at<int>(i);
-      if (idx < (int)image_pts.size() && idx < (int)reproj_pts.size()) {
-        double dx = image_pts[idx].x - reproj_pts[idx].x;
-        double dy = image_pts[idx].y - reproj_pts[idx].y;
-        err_sum += std::sqrt(dx*dx+dy*dy); err_cnt++;
-      }
-    }
-    double avg_err = err_cnt>0? err_sum/err_cnt : 1e9;
-    if (avg_err > 5.0) continue; // 粗略阈值
-
-    // ================== 5. 存储并发布 ==================
-    Eigen::Matrix4f T_grid_to_imu_f = T_grid_to_imu.cast<float>();
+    Eigen::Matrix4d T_imu_cam_left = Eigen::Matrix4d::Identity();
+    Eigen::Matrix4d T_cam_imu_left = Eigen::Matrix4d::Identity();
     {
-      std::lock_guard<std::mutex> lk(april_grid_poses_mtx_);
-      april_grid_poses_.push_back({cam_data.timestamp, T_grid_to_imu_f});
-      while (!april_grid_poses_.empty() && cam_data.timestamp - april_grid_poses_.front().first > 30.0) {
-        april_grid_poses_.pop_front();
-      }
+      auto calib_left = _app->get_state()->_calib_IMUtoCAM.at(0);
+      Eigen::Matrix3d R_imu_to_cam = calib_left->Rot();
+      Eigen::Vector3d p_imu_in_cam = calib_left->pos();
+      T_cam_imu_left.block<3,3>(0,0) = R_imu_to_cam;
+      T_cam_imu_left.block<3,1>(0,3) = p_imu_in_cam;
+      Eigen::Matrix3d R_cam_to_imu = R_imu_to_cam.transpose();
+      Eigen::Vector3d p_cam_in_imu = -R_cam_to_imu * p_imu_in_cam;
+      T_imu_cam_left.block<3,3>(0,0) = R_cam_to_imu;
+      T_imu_cam_left.block<3,1>(0,3) = p_cam_in_imu;
     }
-    _viz->showPose("april_grid_pose", int64_t(cam_data.timestamp*1e6), T_grid_to_imu_f, "LOCAL_WORLD", "APRIL_GRID");
+
+    Eigen::Matrix4d T_imu_cam_right = Eigen::Matrix4d::Identity();
+    Eigen::Matrix4d T_cam_imu_right = Eigen::Matrix4d::Identity();
+    {
+      auto calib_right = _app->get_state()->_calib_IMUtoCAM.at(1);
+      Eigen::Matrix3d R_imu_to_cam = calib_right->Rot();
+      Eigen::Vector3d p_imu_in_cam = calib_right->pos();
+      T_cam_imu_right.block<3,3>(0,0) = R_imu_to_cam;
+      T_cam_imu_right.block<3,1>(0,3) = p_imu_in_cam;
+      Eigen::Matrix3d R_cam_to_imu = R_imu_to_cam.transpose();
+      Eigen::Vector3d p_cam_in_imu = -R_cam_to_imu * p_imu_in_cam;
+      T_imu_cam_right.block<3,3>(0,0) = R_cam_to_imu;
+      T_imu_cam_right.block<3,1>(0,3) = p_cam_in_imu;
+      
+    }
+
+    PRINT_INFO("AprilGrid detected: left tags=%zu, right tags=%zu\n", corners_left_good.corner_ids.size(), corners_right_good.corner_ids.size());
+
+    Eigen::Matrix4d T_grid_to_cam, T_grid_to_imu;
+    if (solvePnP(point2d_left_normalized, point3d_left, cam_left, T_grid_to_cam)) {
+      T_grid_to_imu = T_imu_cam_left * T_grid_to_cam;
+      PRINT_DEBUG("[APRIL_GRID] Left camera PnP solved, tags=%zu\n", corners_left_good.corner_ids.size());
+    } else if (solvePnP(point2d_right_normalized, point3d_right, cam_right, T_grid_to_cam)) {
+      T_grid_to_imu = T_imu_cam_right * T_grid_to_cam;
+      PRINT_DEBUG("[APRIL_GRID] Right camera PnP solved, tags=%zu\n", corners_right_good.corner_ids.size());
+    } else {
+      continue; 
+    }
+
+    PRINT_INFO("AprilGrid PnP pose estimated.\n");
+
+    // 准备用ceres解算新的pose
+    bool is_success = optimizeIMUPoseWithCeres(point2d_left_normalized, point2d_right_normalized, 
+                                               point3d_left, point3d_right, T_cam_imu_left, T_cam_imu_right,
+                                               cam_left, cam_right, T_grid_to_imu);
+
+
+    Eigen::Matrix4d T_imu_to_grid = Eigen::Matrix4d::Identity();
+    T_imu_to_grid.block(0,0,3,3) = T_grid_to_imu.block(0,0,3,3).transpose();
+    T_imu_to_grid.block(0,3,3,1) = -T_imu_to_grid.block(0,0,3,3) * T_grid_to_imu.block(0,3,3,1);
+    Eigen::Matrix4f T_imu_to_grid_f = T_imu_to_grid.cast<float>();
+
+    Eigen::Matrix4f T_local_grid = cam_data.T_local_imu * T_imu_to_grid_f.inverse();
+
+    _viz->showPose("april_grid_pose", int64_t(cam_data.timestamp*1e6), T_imu_to_grid_f, "APRIL_GRID", "IMU2");
+    _viz->showPose("april_local_grid_pose", int64_t(cam_data.timestamp*1e6), T_local_grid, "LOCAL", "APRIL_GRID");
     PRINT_DEBUG("[APRIL_GRID] pose updated tags=%zu inliers=%d err=%.2f\n", tag_corners_ref.size(), inliers.rows, avg_err);
   }
 
   PRINT_INFO("AprilGrid detection thread stopped\n");
 }
 
-bool FGVisualizer::solvePnP(const std::vector<cv::Point2f>& points2d,
-                            const std::vector<cv::Point2f>& points3d,
+bool FGVisualizer::solvePnP(const std::vector<Eigen::Vector2d>& points2d,
+                            const std::vector<Eigen::Vector3d>& points3d,
+                            const std::vector<double>& cam_params,
                             Eigen::Matrix4d& T_grid_to_cam) {
 
-  // 使用RANSAC进行PnP求解
-  cv::Mat rvec_left, tvec_left;
-  cv::Mat inliers;
+  if (points2d.size() != points3d.size() || points2d.size() < 4) {
+    PRINT_ERROR("solvePnP: need N>=4 and 2D/3D sizes equal, got %zu / %zu\n",
+                points2d.size(), points3d.size());
+    return false;
+  }
+  if (cam_params.size() < 4) {
+    PRINT_ERROR("solvePnP: cam_params must have at least fx, fy, cx, cy\n");
+    return false;
+  }
 
-  bool success = cv::solvePnPRansac(object_points, left_points, K_left, D_left, rvec_left, tvec_left,
-                                   false, 100, 8.0, 0.99, inliers, cv::SOLVEPNP_ITERATIVE);
+  // 使用RANSAC进行PnP求解
+  cv::Mat rvec, tvec;
+  cv::Mat inliers;
+  cv::Mat K = (cv::Mat_<double>(3, 3) << cam_params[0], 0, cam_params[2],
+                                        0, cam_params[1], cam_params[3],
+                                        0, 0, 1);
+
+  PRINT_INFO("solvePnP: points2d=%zu, points3d=%zu\n", points2d.size(), points3d.size());
+
+  // 将输入点转换为cv::Mat格式
+  std::vector<cv::Point2f> cv_points2d;
+  for (const auto& pt : points2d) {
+    cv_points2d.emplace_back(static_cast<float>(pt.x()), static_cast<float>(pt.y()));
+  } 
+  std::vector<cv::Point3f> cv_points3d;
+  for (const auto& pt : points3d) {
+    cv_points3d.emplace_back(static_cast<float>(pt.x()), static_cast<float>(pt.y()), static_cast<float>(pt.z()));
+  }
+
+  PRINT_INFO("solvePnP: cv_points2d=%zu, cv_points3d=%zu\n", cv_points2d.size(), cv_points3d.size());
+
+  // points2d是归一化平面坐标
+  bool success = cv::solvePnPRansac(cv_points3d, cv_points2d, K, cv::Mat::zeros(4, 1, CV_64F),
+                                    rvec, tvec, false, 100, 8.0, 0.99, inliers);
 
   if (!success || inliers.rows < 6) {
     return false; // PnP求解失败或内点太少
@@ -1121,170 +1175,70 @@ bool FGVisualizer::solvePnP(const std::vector<cv::Point2f>& points2d,
 
   // 将旋转向量转换为旋转矩阵
   cv::Mat R_left;
-  cv::Rodrigues(rvec_left, R_left);
+  cv::Rodrigues(rvec, R_left);
 
   // 计算左相机到AprilGrid的变换
-  Eigen::Matrix4d T_grid_to_left_cam = Eigen::Matrix4d::Identity();
+  T_grid_to_cam = Eigen::Matrix4d::Identity();
 
-  cv::Mat R_left_eigen, tvec_left_eigen;
-  R_left.convertTo(R_left_eigen, CV_64F);
-  tvec_left.convertTo(tvec_left_eigen, CV_64F);
+  cv::Mat R_eigen, tvec_eigen;
+  R_left.convertTo(R_eigen, CV_64F);
+  tvec.convertTo(tvec_eigen, CV_64F);
 
-  T_grid_to_left_cam.block(0, 0, 3, 3) = Eigen::Map<Eigen::Matrix3d>(R_left_eigen.ptr<double>());
-  T_grid_to_left_cam.block(0, 3, 3, 1) = Eigen::Map<Eigen::Vector3d>(tvec_left_eigen.ptr<double>());
-
-  // 获取左相机到IMU的变换
-  Eigen::Matrix4d T_left_cam_to_imu = Eigen::Matrix4d::Identity();
-  T_left_cam_to_imu.block(0, 0, 3, 3) = _app->get_state()->_calib_IMUtoCAM.at(0)->Rot().transpose();
-  T_left_cam_to_imu.block(0, 3, 3, 1) = -T_left_cam_to_imu.block(0, 0, 3, 3) * _app->get_state()->_calib_IMUtoCAM.at(0)->pos();
-
-  // 计算AprilGrid到IMU的变换
-  T_grid_to_imu = T_left_cam_to_imu * T_grid_to_left_cam;
-
-  // 使用标定好的外参计算右相机的位姿进行验证
-  cv::Mat rvec_right, tvec_right;
-
-  // 方法：从左相机位姿和标定外参计算右相机位姿
-  // T_grid_to_right_cam = T_LR * T_grid_to_left_cam
-  Eigen::Matrix4d T_LR_eigen; // 右相机相对于左相机的变换
-  cv::cv2eigen(R_lr, T_LR_eigen.block(0, 0, 3, 3));
-  cv::cv2eigen(t_lr, T_LR_eigen.block(0, 3, 3, 1));
-  T_LR_eigen(3, 3) = 1.0;
-
-  Eigen::Matrix4d T_grid_to_left_cam = Eigen::Matrix4d::Identity();
-  cv::Mat R_left_cv, tvec_left_cv;
-  R_left.convertTo(R_left_cv, CV_64F);
-  tvec_left.convertTo(tvec_left_cv, CV_64F);
-
-  T_grid_to_left_cam.block(0, 0, 3, 3) = Eigen::Map<Eigen::Matrix3d>(R_left_cv.ptr<double>());
-  T_grid_to_left_cam.block(0, 3, 3, 1) = Eigen::Map<Eigen::Vector3d>(tvec_left_cv.ptr<double>());
-
-  // 使用标定外参计算右相机位姿
-  Eigen::Matrix4d T_grid_to_right_cam = T_LR_eigen * T_grid_to_left_cam;
-
-  cv::Mat R_right_mat = cv::Mat::eye(3, 3, CV_64F);
-  cv::Mat t_right_mat = cv::Mat::zeros(3, 1, CV_64F);
-  Eigen::Map<Eigen::Matrix3d>(R_right_mat.ptr<double>()) = T_grid_to_right_cam.block(0, 0, 3, 3);
-  Eigen::Map<Eigen::Vector3d>(t_right_mat.ptr<double>()) = T_grid_to_right_cam.block(0, 3, 3, 1);
-
-  cv::Rodrigues(R_right_mat, rvec_right);
-  tvec_right = t_right_mat;
-
-  // 优化重投影误差验证：同时验证左相机和右相机
-  std::vector<cv::Point2f> left_projected, right_projected;
-
-  // 验证左相机重投影误差
-  cv::projectPoints(object_points, rvec_left, tvec_left, K_left, D_left, left_projected);
-
-  // 验证右相机重投影误差（使用标定外参计算的右相机位姿）
-  cv::projectPoints(object_points, rvec_right, tvec_right, K_right, D_right, right_projected);
-
-  double total_left_error = 0.0, total_right_error = 0.0;
-  int valid_left_count = 0, valid_right_count = 0;
-
-  // 计算左相机重投影误差（只计算PnP内点）
-  for (int i = 0; i < inliers.rows; i++) {
-    int idx = inliers.at<int>(i);
-    if (idx < left_points.size() && idx < left_projected.size()) {
-      double dx = left_points[idx].x - left_projected[idx].x;
-      double dy = left_points[idx].y - left_projected[idx].y;
-      total_left_error += sqrt(dx*dx + dy*dy);
-      valid_left_count++;
-    }
-  }
-
-  // 计算右相机重投影误差
-  for (size_t i = 0; i < right_points.size() && i < right_projected.size(); i++) {
-    double dx = right_points[i].x - right_projected[i].x;
-    double dy = right_points[i].y - right_projected[i].y;
-    total_right_error += sqrt(dx*dx + dy*dy);
-    valid_right_count++;
-  }
-
-  double avg_left_error = valid_left_count > 0 ? total_left_error / valid_left_count : 1000.0;
-  double avg_right_error = valid_right_count > 0 ? total_right_error / valid_right_count : 1000.0;
-
-  // 更严格的阈值：左右相机重投影误差都要小
-  if (avg_left_error > 3.0 || avg_right_error > 4.0) {
-    PRINT_DEBUG("[APRIL_GRID] PnP验证失败 - 左相机误差: %.2f, 右相机误差: %.2f 像素\n",
-               avg_left_error, avg_right_error);
-    return false;
-  }
-
-  PRINT_DEBUG("[APRIL_GRID] PnP验证通过 - 左相机误差: %.2f, 右相机误差: %.2f 像素, 内点: %d/%zu\n",
-             avg_left_error, avg_right_error, inliers.rows, left_points.size());
+  T_grid_to_cam.block(0, 0, 3, 3) = Eigen::Map<Eigen::Matrix3d>(R_eigen.ptr<double>());
+  T_grid_to_cam.block(0, 3, 3, 1) = Eigen::Map<Eigen::Vector3d>(tvec_eigen.ptr<double>());
 
   return true;
 }
 
-// ========== Ceres AprilGrid位姿优化器实现 ==========
-
-// 坐标转换辅助函数：像素坐标到归一化平面坐标
-cv::Point2f FGVisualizer::pixelToNormalized(const cv::Point2f& pixel, const cv::Mat& K) {
-  double fx = K.at<double>(0, 0);
-  double fy = K.at<double>(1, 1);
-  double cx = K.at<double>(0, 2);
-  double cy = K.at<double>(1, 2);
-
-  return cv::Point2f((pixel.x - cx) / fx, (pixel.y - cy) / fy);
-}
-
-std::vector<cv::Point2f> FGVisualizer::pixelsToNormalized(const std::vector<cv::Point2f>& pixels, const cv::Mat& K) {
-  std::vector<cv::Point2f> normalized;
-  normalized.reserve(pixels.size());
-
-  for (const auto& pixel : pixels) {
-    normalized.push_back(pixelToNormalized(pixel, K));
-  }
-
-  return normalized;
-}
-
 // 使用Ceres优化IMU位姿 - 根据新的ReprojectionError设计重写
-bool FGVisualizer::optimizeIMUPoseWithCeres(const std::vector<cv::Point2f>& left_points_norm,
-                                            const std::vector<cv::Point2f>& right_points_norm,
-                                            const std::vector<cv::Point3f>& object_points,
+bool FGVisualizer::optimizeIMUPoseWithCeres(const std::vector<Eigen::Vector2d>& left_points2d,
+                                            const std::vector<Eigen::Vector2d>& right_points2d,
+                                            const std::vector<Eigen::Vector3d>& left_points3d,
+                                            const std::vector<Eigen::Vector3d>& right_points3d,
                                             const Eigen::Matrix4d& T_ItoC_left,
                                             const Eigen::Matrix4d& T_ItoC_right,
+                                            const std::vector<double>& cam_left,
+                                            const std::vector<double>& cam_right,
                                             Eigen::Matrix4d& T_grid_to_imu) {
 
   // 创建Ceres优化问题
   ceres::Problem problem;
-  ceres::LossFunction* loss_function = new ceres::HuberLoss(1.0);
+  ceres::LossFunction* loss_function = new ceres::HuberLoss(1.0); // 鲁棒损失函数是不是有问题
 
   // 初始IMU位姿参数 - 根据ReprojectionError operator()的期望格式
   // pose_q[0-3]: 四元数 [qw, qx, qy, qz]
-  // pose_t[0-6]: 7个参数，其中pose_t[4-6]用于平移 [tx, ty, tz]
+  // pose_t[0-2]: 3个参数，其中pose_t[0-2]用于平移 [tx, ty, tz]
   double pose_q[4];
-  double pose_t[7] = {0, 0, 0, 0, 0, 0, 0}; // 前4个参数预留，使用后3个存储平移
+  double pose_t[3] = {0, 0, 0}; // 前4个参数预留，使用后3个存储平移
 
   // 从当前T_grid_to_imu矩阵初始化参数
-  Eigen::Quaterniond q_init(T_grid_to_imu.block(0, 0, 3, 3));
-  pose_q[0] = q_init.w(); pose_q[1] = q_init.x(); pose_q[2] = q_init.y(); pose_q[3] = q_init.z();
-  pose_t[4] = T_grid_to_imu(0, 3); pose_t[5] = T_grid_to_imu(1, 3); pose_t[6] = T_grid_to_imu(2, 3);
+  Eigen::Matrix3d R_init = T_grid_to_imu.block(0, 0, 3, 3);
+  Eigen::Quaterniond q_init(R_init);
+  pose_q[3] = q_init.w(); pose_q[0] = q_init.x(); pose_q[1] = q_init.y(); pose_q[2] = q_init.z();
+  pose_t[0] = T_grid_to_imu(0, 3); pose_t[1] = T_grid_to_imu(1, 3); pose_t[2] = T_grid_to_imu(2, 3);
 
   // 添加左相机重投影误差约束
-  for (size_t i = 0; i < left_points_norm.size() && i < object_points.size(); i++) {
+  for (size_t i = 0; i < left_points2d.size() && i < left_points3d.size(); i++) {
     // 转换为Eigen::Vector2d和Eigen::Vector3d
-    Eigen::Vector2d point2d_left(left_points_norm[i].x, left_points_norm[i].y);
-    Eigen::Vector3d point3d(object_points[i].x, object_points[i].y, object_points[i].z);
+    Eigen::Vector2d point2d = left_points2d[i];
+    Eigen::Vector3d point3d = left_points3d[i];
 
     ceres::CostFunction* cost_function =
       new ceres::AutoDiffCostFunction<ReprojectionError, 2, 4, 3>(
-        new ReprojectionError(point2d_left, point3d, T_ItoC_left));
+        new ReprojectionError(point2d, point3d, cam_left, T_ItoC_left));
 
     problem.AddResidualBlock(cost_function, loss_function, pose_q, pose_t);
   }
 
   // 添加右相机重投影误差约束
-  for (size_t i = 0; i < right_points_norm.size() && i < object_points.size(); i++) {
+  for (size_t i = 0; i < right_points2d.size() && i < right_points3d.size(); i++) {
     // 转换为Eigen::Vector2d和Eigen::Vector3d
-    Eigen::Vector2d point2d_right(right_points_norm[i].x, right_points_norm[i].y);
-    Eigen::Vector3d point3d(object_points[i].x, object_points[i].y, object_points[i].z);
+    Eigen::Vector2d point2d = right_points2d[i];
+    Eigen::Vector3d point3d = right_points3d[i];
 
     ceres::CostFunction* cost_function =
-      new ceres::AutoDiffCostFunction<ReprojectionError, 2, 4, 7>(
-        new ReprojectionError(point2d_right, point3d, T_ItoC_right));
+      new ceres::AutoDiffCostFunction<ReprojectionError, 2, 4, 3>(
+        new ReprojectionError(point2d, point3d, cam_right, T_ItoC_right));
 
     problem.AddResidualBlock(cost_function, loss_function, pose_q, pose_t);
   }
@@ -1297,11 +1251,8 @@ bool FGVisualizer::optimizeIMUPoseWithCeres(const std::vector<cv::Point2f>& left
   ceres::Solver::Options options;
   options.linear_solver_type = ceres::DENSE_NORMAL_CHOLESKY;
   options.minimizer_progress_to_stdout = false;
-  options.max_num_iterations = 50;
+  options.max_num_iterations = 10;
   options.num_threads = 2;
-  options.function_tolerance = 1e-6;
-  options.gradient_tolerance = 1e-10;
-  options.parameter_tolerance = 1e-8;
 
   // 求解
   ceres::Solver::Summary summary;
