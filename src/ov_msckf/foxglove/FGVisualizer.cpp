@@ -1014,7 +1014,7 @@ void FGVisualizer::aprilGridDetectionThread() {
     detector.detectTags(cam_data.images[0], corners_left_good.corners, corners_left_good.corner_ids, corners_left_good.radii,
                         corners_left_bad.corners, corners_left_bad.corner_ids, corners_left_bad.radii);
 
-  PRINT_DEBUG("[APRIL_GRID] tags detection for right image ts=%.6f\n", cam_data.timestamp);
+    PRINT_DEBUG("[APRIL_GRID] tags detection for right image ts=%.6f\n", cam_data.timestamp);
 
     detector.detectTags(cam_data.images[1], corners_right_good.corners, corners_right_good.corner_ids, corners_right_good.radii,
                         corners_right_bad.corners, corners_right_bad.corner_ids, corners_right_bad.radii);
