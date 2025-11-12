@@ -42,7 +42,7 @@ using namespace cv;
 using namespace ov_msckf;
 
 // 全局变量定义
-int task = 0; // 任务标志：0-MSCKF，1-Only IMU Record，2-Only Stereo Record, 3-Stereo IMU Record, 4-Only Visualize
+int task = 0; // 任务标志：0-MSCKF，1-Only IMU Record，2-Only Stereo Record, 3-Stereo IMU Record, 4-Only Visualize, 5-MSCKF+DEBUG
 VIDataset::Ptr g_vi_dataset;
 std::shared_ptr<FGVisualizer> viz_;
 
@@ -134,7 +134,7 @@ void startIMUDriverRecord(const std::string& serial_device = "/dev/ttyS3") {
     if (s.has_mag)   msg.hm = s.mag;
     if (s.has_R)     msg.Rm = s.R; else msg.Rm.setIdentity();
 
-    if (task == 0) {
+    if (task == 0 || task == 5) {
         viz_->feedIMU(msg);
     }
     
@@ -149,11 +149,11 @@ void startIMUDriverRecord(const std::string& serial_device = "/dev/ttyS3") {
   }
 }
 
-void startCameraDriverRecord(const std::string& device_path = "/dev/video73", double track_frequency = 20.0) {
+void startCameraDriverRecord(const std::string& device_path = "/dev/video73", double track_frequency = 30.0) {
     using namespace ov_sensors;
     if (cam_driver_) return;
 
-    if (task == 1) {
+    if (task == 2) {
         april_grid = std::make_shared<CAMERA_CALIB::AprilGrid>(std::string(PROJ_DIR) + "/thirdparty/kalibrlib/apps/others/aprilgrid.yaml");
         dqe_left = std::make_shared<FrameQualityEvaluator>();
         dqe_right = std::make_shared<FrameQualityEvaluator>();
@@ -164,7 +164,7 @@ void startCameraDriverRecord(const std::string& device_path = "/dev/video73", do
     cfg.track_frequency = track_frequency;
     cam_driver_ = std::make_shared<V4L2CameraDriver>(cfg);
     cam_driver_->setCallback([&](const ov_sensors::CameraFrame& f){
-        if (task == 0) {
+        if (task == 0 || task == 5) {
             ov_core::CameraData msg;
             msg.timestamp = f.timestamp_raw;
             msg.sensor_ids = f.sensor_ids;
@@ -208,8 +208,11 @@ int main(int argc, char **argv) {
     std::string root_dir = std::string(PROJ_DIR) + "/calib_data/";
 
     // 创建时间戳目录
-    if (task == 0) {
+    if (task == 0 || task == 5) {
         root_dir = viz_->debug_dir;
+        if (task == 5) {
+            g_vi_dataset = std::make_shared<VIDataset>(root_dir, 0);
+        }
     } else if (task >= 1 && task <=3) {
         if (task == 1) {
             root_dir += "/imu_calib/";
@@ -227,8 +230,10 @@ int main(int argc, char **argv) {
 
     startIMUDriverRecord(imu_device_);
     if (task != 1) {
-        startCameraDriverRecord(cam_device_, 20.0);
+        startCameraDriverRecord(cam_device_, sys->get_params().track_frequency);
     }
+
+    viz_->run();
 
     return 0;
 }

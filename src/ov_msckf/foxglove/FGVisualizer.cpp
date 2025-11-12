@@ -58,6 +58,10 @@ FGVisualizer::FGVisualizer(std::shared_ptr<VioManager> app, bool is_viz)
   _dash_board = std::make_shared<DashBoard>();
 }
 
+FGVisualizer::~FGVisualizer() {
+  visualize_final();
+}
+
 void FGVisualizer::create_debug_dir() {
   std::time_t t = std::time(nullptr);
   std::tm tm = *std::localtime(&t);
@@ -69,6 +73,9 @@ void FGVisualizer::create_debug_dir() {
   fs::create_directories(debug_dir);
 
   initSpdlog("vins", debug_dir);
+
+  odom_out_ptr_ = std::make_shared<std::ofstream>(debug_dir + "odom_imu.txt");
+  odom_cam_ptr_ = std::make_shared<std::ofstream>(debug_dir + "odom_cam.txt");
 }
 
 void FGVisualizer::visualize_final() {
@@ -147,8 +154,6 @@ void FGVisualizer::setDevicesAndLatency(const std::string &imu_dev,
                                         const std::string &cam_dev,
                                         const std::string &pose_dev,
                                         double cam_latency){
-  imu_device_ = imu_dev;
-  cam_device_ = cam_dev;
   pose_serial_device_ = pose_dev;
   cam_fixed_latency_ = cam_latency;
 }
@@ -172,44 +177,42 @@ void FGVisualizer::startCore() {
   // 启动统一消费者线程（只启动一次）
   if (!running_) {
     running_ = true;
-    consumer_thread_ = std::thread([&]{
-      while (running_) {
-        std::unique_lock<std::mutex> lk(imu_time_mtx_);
-        imu_cv_.wait(lk, [&]{ return !running_ || imu_new_flag_; });
-        if (!running_) break;
-        imu_new_flag_ = false;
-        double imu_ts_inC = last_imu_timestamp_inC_;
-        lk.unlock();
+    while (running_) {
+      std::unique_lock<std::mutex> lk(imu_time_mtx_);
+      imu_cv_.wait(lk, [&]{ return !running_ || imu_new_flag_; });
+      if (!running_) break;
+      imu_new_flag_ = false;
+      double imu_ts_inC = last_imu_timestamp_inC_;
+      lk.unlock();
 
-        // 消费相机队列（固定延迟）
-        while (true) {
-          ov_core::CameraData front;
-            {
-              std::lock_guard<std::mutex> qlk(camera_queue_mtx);
-              if (camera_queue.empty()) break;
-              if ((camera_queue.front().timestamp + cam_fixed_latency_) >= imu_ts_inC) break;
-              front = camera_queue.front();
-              camera_queue.pop_front();
-            }
-            auto t0 = boost::posix_time::microsec_clock::local_time();
-            double update_dt_ms = 1000.0 * (imu_ts_inC - front.timestamp);
-            last_images_timestamp = front.timestamp;
-            _app->feed_measurement_camera(front);
-            auto t1 = boost::posix_time::microsec_clock::local_time();
-            publish_cameras();
-            visualize();
-            auto t2 = boost::posix_time::microsec_clock::local_time();
-            
-            double time_slam = (t1 - t0).total_microseconds() * 1e-6;
-            double time_total = (t2 - t0).total_microseconds() * 1e-6;
-            _dash_board->setNameAndValue(0, "TIME", time_total);
-            _dash_board->setNameAndValue(1, "TIME_SLAM", time_slam);
-            _dash_board->setNameAndValue(2, "HZ", 1.0 / std::max(1e-6, time_total));
-            _dash_board->setNameAndValue(3, "UPDATE_DT_MS", update_dt_ms);
-            _dash_board->print();
-        }
+      // 消费相机队列（固定延迟）
+      while (true) {
+        ov_core::CameraData front;
+          {
+            std::lock_guard<std::mutex> qlk(camera_queue_mtx);
+            if (camera_queue.empty()) break;
+            if ((camera_queue.front().timestamp + cam_fixed_latency_) >= imu_ts_inC) break;
+            front = camera_queue.front();
+            camera_queue.pop_front();
+          }
+          auto t0 = boost::posix_time::microsec_clock::local_time();
+          double update_dt_ms = 1000.0 * (imu_ts_inC - front.timestamp);
+          last_images_timestamp = front.timestamp;
+          _app->feed_measurement_camera(front);
+          auto t1 = boost::posix_time::microsec_clock::local_time();
+          publish_cameras();
+          visualize();
+          auto t2 = boost::posix_time::microsec_clock::local_time();
+          
+          double time_slam = (t1 - t0).total_microseconds() * 1e-6;
+          double time_total = (t2 - t0).total_microseconds() * 1e-6;
+          _dash_board->setNameAndValue(0, "TIME", time_total);
+          _dash_board->setNameAndValue(1, "TIME_SLAM", time_slam);
+          _dash_board->setNameAndValue(2, "HZ", 1.0 / std::max(1e-6, time_total));
+          _dash_board->setNameAndValue(3, "UPDATE_DT_MS", update_dt_ms);
+          _dash_board->print();
       }
-    });
+    }
   }
 }
 
@@ -231,6 +234,10 @@ void FGVisualizer::visualize_odometry(double timestamp) {
   T_w_i.block(0, 0, 3, 3) = Eigen::Quaternionf(state_plus(3), state_plus(0), state_plus(1), state_plus(2)).toRotationMatrix();
   T_w_i.block(0, 3, 3, 1) = Eigen::Vector3f(state_plus(4), state_plus(5), state_plus(6));
 
+  (*odom_out_ptr_) << std::fixed << std::setprecision(6) << timestamp << " "
+                   << state_plus(4) << " " << state_plus(5) << " " << state_plus(6) << " "
+                    << state_plus(0) << " " << state_plus(1) << " " << state_plus(2) << " " << state_plus(3) << "\n";
+
   /***************************************六自由度数据输出（异步队列）start*************************************/
   Eigen::Vector3f pos = T_w_i.block<3,1>(0, 3);
   Eigen::Vector3f euler = T_w_i.block<3,3>(0, 0).eulerAngles(0, 1, 2); // RPY
@@ -244,8 +251,8 @@ void FGVisualizer::visualize_odometry(double timestamp) {
   pose_cv_.notify_one();
   /***************************************六自由度数据输出（异步队列）end*************************************/
 
+  if (!_viz) return;
   poses_imu_odom.push_back({timestamp, T_w_i});
-
   _viz->showPose("pose_imu_odom", time_us, T_w_i, "LOCAL_WORLD", "IMU");
 
   const double window_duration = 10.0;               // 秒
@@ -290,28 +297,9 @@ void FGVisualizer::feedStereo(ov_core::CameraData& msg) {
 
   {
     std::lock_guard<std::mutex> lk(camera_queue_mtx);
-    // constexpr size_t MAX_Q = 240; // ~12s @20Hz
-    // if (camera_queue.size() >= MAX_Q) camera_queue.pop_front();
     camera_queue.push_back(std::move(msg));
   }
 }
-
-// void FGVisualizer::startCameraDriver() {
-//   using namespace ov_sensors;
-//   if (cam_driver_) return; // 已启动
-//   V4L2CameraDriver::Config cfg; // 默认参数，可后续从 YAML 读取
-//   cfg.device = cam_device_; // 可配置
-//   cfg.track_frequency = _app->get_params().track_frequency;
-//   cam_driver_ = std::make_shared<V4L2CameraDriver>(cfg);
-//   cam_driver_->setCallback([&](const CameraFrame& f){
-//     feedStereo(f);
-//   });
-//   if (!cam_driver_->start()) {
-//     PRINT_ERROR("Camera driver start failed.\n");
-//   } else {
-//     PRINT_INFO("Camera driver started on %s\n", cam_device_.c_str());
-//   }
-// }
 
 void FGVisualizer::stopDrivers() {
   // 停止消费者
@@ -383,18 +371,11 @@ void FGVisualizer::startPoseThread() {
 }
 
 void FGVisualizer::run() {
-  // startCameraDriver();
-  // startIMUDriver();
-  startCore();
   startPoseThread();
-  while (true) {
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-  }
+  startCore();
 }
 
 void FGVisualizer::visualize() {
-  if (!_viz) return;
-
   // Return if we have already visualized
   if (last_visualization_timestamp == _app->get_state()->_timestamp && _app->initialized())
     return;
@@ -430,8 +411,6 @@ void FGVisualizer::publish_raw_imu(const ov_core::ImuData& s) {
 }
 
 void FGVisualizer::publish_state() {
-  if (!_viz) return;
-
   int64_t time_us = (last_images_timestamp * 1e6);
   std::shared_ptr<State> state = _app->get_state();
 
@@ -442,10 +421,16 @@ void FGVisualizer::publish_state() {
 
   Eigen::Matrix4d poseIinM = Eigen::Matrix4d::Identity();
   Eigen::Quaterniond q_IinM(state->_imu->quat()(3), state->_imu->quat()(0), state->_imu->quat()(1), state->_imu->quat()(2));
+  Eigen::Vector3d t_IinM = state->_imu->pos();
   poseIinM.block(0, 0, 3, 3) = q_IinM.toRotationMatrix();
-  poseIinM.block(0, 3, 3, 1) = state->_imu->pos();
+  poseIinM.block(0, 3, 3, 1) = t_IinM;
   Eigen::Matrix4f poseIinM_f = poseIinM.cast<float>();
 
+  (*odom_cam_ptr_) << std::fixed << std::setprecision(6) << last_images_timestamp << " "
+                   << t_IinM.x() << " " << t_IinM.y() << " " << t_IinM.z() << " "
+                   << q_IinM.x() << " " << q_IinM.y() << " " << q_IinM.z() << " " << q_IinM.w() << "\n";
+
+  if (!_viz) return;
   _viz->showPose("pose_imu", time_us, poseIinM_f, "LOCAL_WORLD", "IMU");
 
   poses_imu_dq.push_back(std::pair<double, Eigen::Matrix4f>(timestamp_inI, poseIinM_f));

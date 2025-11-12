@@ -38,6 +38,7 @@ class FGVisualizer {
 public:
   // 构造函数，传入 VIO 管理器与可选模拟器
   FGVisualizer(std::shared_ptr<VioManager> app, bool is_viz = true);
+  ~FGVisualizer();
 
   // 结束后输出最终可视化（如参数、RMSE等）
   void visualize_final();
@@ -120,8 +121,6 @@ public:
 
   // 可视化器指针
   foxglove_viz::Visualizer::Ptr _viz = nullptr;
-  std::string imu_device_ = "/dev/ttyS3";
-  std::string cam_device_ = "/dev/video73";
   std::string pose_serial_device_ = "/dev/ttyS5";
   double cam_fixed_latency_ = 0.030; // 默认 30ms
 
@@ -136,6 +135,8 @@ public:
 
   // 日志输出根目录
   std::string debug_dir = std::string(PROJ_DIR) + "/debug_data/";
+  std::shared_ptr<std::ofstream> odom_out_ptr_;
+  std::shared_ptr<std::ofstream> odom_cam_ptr_;
 
   // IMU 时间（camera 时基下）
   std::mutex imu_time_mtx_;
