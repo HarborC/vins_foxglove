@@ -14,9 +14,7 @@ BASE_DIR=$(cd $(dirname $0);pwd)
 # cd ${BASE_DIR}/thirdparty/apriltag
 # sh build.sh
 
-cd ${BASE_DIR}
-# rm -rf build
+cd "${BASE_DIR}"
 mkdir -p build && cd build
-clear
-cmake -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="../install" .. 
-ninja -j2
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="../install" ..
+ninja

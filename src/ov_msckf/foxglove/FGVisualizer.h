@@ -15,13 +15,10 @@
 #include <boost/date_time/posix_time/posix_time.hpp>
 #include <boost/filesystem.hpp>
 #include <foxglove/visualizer.h>
-#include <ceres/ceres.h>
-#include <ceres/rotation.h>
 
 #include "foxglove/dash_board.h"  // 可视化仪表板模块
-#include "serial_imu/IImuDriver.h"   // IMU 驱动接口
-#include "camera_v4l2/ICameraDriver.h" // 相机驱动接口
-#include "calibration/aprilgrid.h"
+#include "utils/sensor_data.h"
+
 
 // ========== 命名空间定义 ==========
 
@@ -39,38 +36,28 @@ class Simulator;
 // 可视化主类定义
 class FGVisualizer {
 public:
-  struct OdometryData {
-    /// Timestamp of the reading
-    double timestamp;
-
-    /// Camera ids for each of the images collected
-    std::vector<int> sensor_ids;
-
-    /// Raw image we have collected for each camera
-    std::vector<cv::Mat> images;
-
-    Eigen::Matrix4f T_local_imu; // 相机时基下的 IMU 位姿
-  };
-public:
   // 构造函数，传入 VIO 管理器与可选模拟器
-  FGVisualizer(std::shared_ptr<VioManager> app, std::shared_ptr<Simulator> sim = nullptr);
+  FGVisualizer(std::shared_ptr<VioManager> app, bool is_viz = true);
 
   // 结束后输出最终可视化（如参数、RMSE等）
   void visualize_final();
 
   // 使用独立驱动后的启动接口（向后兼容）
-  void startIMUDriver();
-  void startCameraDriver();
+  // void startIMUDriver();
+  // void startCameraDriver();
+  void startCore();
   void stopDrivers();
   void setDevicesAndLatency(const std::string &imu_dev,
                             const std::string &cam_dev,
                             const std::string &pose_dev,
                             double cam_latency);
 
-  void runRealsenseIO();
-
   // 运行主函数，启动各线程
   void run();
+
+  void feedIMU(const ov_core::ImuData& msg);
+
+  void feedStereo(ov_core::CameraData& msg);
 
   // 可视化主接口，调用状态、轨迹、特征等发布
   void visualize();
@@ -79,7 +66,7 @@ public:
 
   // 发布历史图像
   void publish_images();
-
+    
   // 发布状态估计结果
   void publish_state();
 
@@ -89,14 +76,16 @@ public:
   // 发布相机的位姿、内参矩阵等
   void publish_cameras();
 
+  void show_image(const std::string &topic_nm, const int64_t &usec, const cv::Mat &viz_img, const std::string &parent_frm);
+
+  // 发布IMU等
+  void publish_raw_imu(const ov_core::ImuData& s);
+
   // 创建调试输出文件夹
   void create_debug_dir();
 
   // VIO 管理器核心对象
   std::shared_ptr<VioManager> _app;
-
-  // 模拟器（为空则非仿真模式）
-  std::shared_ptr<Simulator> _sim;
 
   // 是否已有后端线程在运行
   std::atomic<bool> thread_update_running;
@@ -111,9 +100,6 @@ public:
   // 最近一次状态/图像可视化的时间戳
   double last_visualization_timestamp = 0;
   double last_visualization_timestamp_image = 0;
-
-  // 真值轨迹（用于评估）
-  std::map<double, Eigen::Matrix<double, 17, 1>> gt_states;
 
   // 累积误差统计
   double summed_mse_ori = 0.0;
@@ -133,36 +119,23 @@ public:
   std::deque<std::pair<double, Eigen::Matrix4f>> poses_imu_odom;
 
   // 可视化器指针
-  foxglove_viz::Visualizer::Ptr _viz;
+  foxglove_viz::Visualizer::Ptr _viz = nullptr;
+  std::string imu_device_ = "/dev/ttyS3";
+  std::string cam_device_ = "/dev/video73";
+  std::string pose_serial_device_ = "/dev/ttyS5";
+  double cam_fixed_latency_ = 0.030; // 默认 30ms
 
   // 实时仪表板
   DashBoard::Ptr _dash_board;
 
   // 最近一帧图像的时间戳与数据（用于可视化）
   double last_images_timestamp = 0;
-  std::vector<cv::Mat> last_images;
 
   // 新一帧 IMU 的时间戳（备用）
   double new_imu_timestamp = -1;
 
   // 日志输出根目录
-  std::string debug_dir = "./debug_data/";
-
-  // 是否为调试模式（控制是否保存图像/IMU）
-  bool is_debug = false;
-
-  // 新增：相机驱动指针（最小实现）
-  std::shared_ptr<ov_sensors::ICameraDriver> cam_driver_;
-
-  // 新增：独立IMU驱动指针（最小实现）
-  std::shared_ptr<class ov_sensors::IImuDriver> imu_driver_;
-  std::shared_ptr<std::ofstream> imu_log_file_;
-
-  // ========= 新增配置与状态 =========
-  std::string imu_device_ = "/dev/ttyS3";
-  std::string cam_device_ = "/dev/video73";
-  std::string pose_serial_device_ = "/dev/ttyS5";
-  double cam_fixed_latency_ = 0.030; // 默认 30ms
+  std::string debug_dir = std::string(PROJ_DIR) + "/debug_data/";
 
   // IMU 时间（camera 时基下）
   std::mutex imu_time_mtx_;
@@ -190,79 +163,6 @@ public:
 
   // 启动 / 停止 姿态发送线程
   void startPoseThread();
-
-  // AprilGrid检测和PnP定位相关函数
-  void startAprilGridLocalization();
-  void aprilGridDetectionThread();
-  bool solvePnP(const std::vector<Eigen::Vector2d>& points2d,
-                const std::vector<Eigen::Vector3d>& points3d,
-                const std::vector<double>& cam_params,
-                Eigen::Matrix4d& T_grid_to_cam);
-
-  // AprilGrid检测相关成员变量
-  std::atomic<bool> april_grid_running_{false};
-  std::thread april_grid_thread_;
-  std::shared_ptr<CAMERA_CALIB::AprilGrid> april_grid_;
-  std::deque<OdometryData> april_grid_image_queue_;
-  std::mutex april_grid_queue_mtx_;
-  std::condition_variable april_grid_cv_;
-  size_t april_grid_queue_max_ = 10; // 限制队列长度
-
-  // ========== Ceres AprilGrid位姿优化器 ==========
-
-  // 简化的重投影误差代价函数
-  class ReprojectionError {
-  public:
-    ReprojectionError(const Eigen::Vector2d& point2d,
-                      const Eigen::Vector3d& point3d,
-                      const std::vector<double>& cam_params,
-                      const Eigen::Matrix4d& T_ci)
-      : point3d_(point3d), cam_params_(cam_params), T_ci_(T_ci) {
-        point2d_.x() = point2d.x() - cam_params[2];
-        point2d_.y() = point2d.y() - cam_params[3];
-      }
-
-    // 注意：此处使用 EigenQuaternionParameterization，对应存储顺序为 [x,y,z,w]
-    template <typename T>
-    bool operator()(const T* const pose_q, const T* const pose_t, T* residuals) const {
-      // pose_q: [x,y,z,w]  -> 构造 Eigen::Quaternion(w,x,y,z)
-      Eigen::Quaternion<T> q_iw(pose_q[3], pose_q[0], pose_q[1], pose_q[2]);
-      // pose_t: [tx,ty,tz]
-      Eigen::Matrix<T,3,1> t_iw(pose_t[0], pose_t[1], pose_t[2]);
-
-      Eigen::Quaternion<T> q_cw = Eigen::Quaternion<T>(T_ci_.block<3,3>(0,0).cast<T>()) * q_iw;
-      Eigen::Matrix<T,3,1> t_cw = Eigen::Matrix<T,3,1>(T_ci_.block<3,1>(0,3).cast<T>()) + q_cw * t_iw;
-
-      Eigen::Matrix<T,3,1> point_3d_T = point3d_.cast<T>();
-      Eigen::Matrix<T,3,1> point_in_c = q_cw * point_3d_T + t_cw;
-
-      if (point_in_c(2) <= T(0)) {
-        return false;
-      }
-
-      residuals[0] = point_in_c(0) / point_in_c(2) * T(cam_params_[0]) - T(point2d_(0));
-      residuals[1] = point_in_c(1) / point_in_c(2) * T(cam_params_[1]) - T(point2d_(1));
-
-      return true;
-    }
-
-  private:
-    Eigen::Vector2d point2d_;
-    Eigen::Vector3d point3d_;
-    Eigen::Matrix4d T_ci_;
-    std::vector<double> cam_params_;
-  };
-
-  // Ceres优化器函数
-  bool optimizeIMUPoseWithCeres(const std::vector<Eigen::Vector2d>& left_points2d,
-                                const std::vector<Eigen::Vector2d>& right_points2d,
-                                const std::vector<Eigen::Vector3d>& left_points3d,
-                                const std::vector<Eigen::Vector3d>& right_points3d,
-                                const Eigen::Matrix4d& T_ItoC_left,
-                                const Eigen::Matrix4d& T_ItoC_right,
-                                const std::vector<double>& cam_left,
-                                const std::vector<double>& cam_right,
-                                Eigen::Matrix4d& T_grid_to_imu);
 };
 
 } // namespace ov_msckf

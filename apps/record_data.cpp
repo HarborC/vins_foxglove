@@ -35,7 +35,7 @@ using namespace std;
 using namespace cv;
 
 // 全局变量定义
-foxglove_viz::Visualizer::Ptr viz; // 可视化工具指针
+foxglove_viz::Visualizer::Ptr viz_; // 可视化工具指针
 std::deque<ov_core::CameraData> camera_queue; // 相机数据队列
 std::mutex camera_queue_mtx; // 互斥锁
 std::atomic<bool> thread_update_running = false;
@@ -90,9 +90,9 @@ void startIMUDriverRecord(const std::string& serial_device = "/dev/ttyS3") {
     if (s.has_mag)   msg.hm = s.mag;
     if (s.has_R)     msg.Rm = s.R; else msg.Rm.setIdentity();
     writeIMU(msg);
-    viz->publishIMU("raw_imu", int64_t(msg.timestamp * 1e6), "IMU", msg.am, msg.wm, Eigen::Quaterniond(msg.Rm), msg.hm);
+    viz_->publishIMU("raw_imu", int64_t(msg.timestamp * 1e6), "IMU", msg.am, msg.wm, Eigen::Quaterniond(msg.Rm), msg.hm);
     Eigen::Matrix4f T = Eigen::Matrix4f::Identity(); T.block(0,0,3,3) = msg.Rm.cast<float>();
-    viz->showPose("imu_angle", int64_t(msg.timestamp * 1e6), T, "LOCAL_WORLD", "IMU_R");
+    viz_->showPose("imu_angle", int64_t(msg.timestamp * 1e6), T, "LOCAL_WORLD", "IMU_R");
   });
   if (!g_imu->start()) {
     std::cerr << "Failed to start ImuDriver on " << serial_device << std::endl;
@@ -159,7 +159,7 @@ void stereoCalibDataGet(const ov_core::CameraData& image_msg) {
     cv::vconcat(image_combined, status_image, image_combined);
     
     int64_t time_us = (image_msg.timestamp * 1e6);
-    viz->showImage("dete_images", time_us, image_combined, "dete_images", true);
+    viz_->showImage("dete_images", time_us, image_combined, "dete_images", true);
 
     thread_update_running = false;
 }
@@ -233,7 +233,7 @@ int main(int argc, char **argv) {
     fs::create_directories(root_dir);
 
     // 初始化可视化器
-    viz = std::make_shared<foxglove_viz::Visualizer>(8088, 2);
+    viz_ = std::make_shared<foxglove_viz::Visualizer>(8088, 2);
 
     // 启动 IMU 驱动（异步回调）
     startIMUDriverRecord("/dev/ttyS3");
@@ -263,7 +263,7 @@ int main(int argc, char **argv) {
                 cv::Mat image_combined;
                 cv::hconcat(image.images[0], image.images[1], image_combined);
                 int64_t time_us = (image.timestamp * 1e6);
-                viz->showImage("track_images", time_us, image_combined, "track_images", true);
+                viz_->showImage("track_images", time_us, image_combined, "track_images", true);
             } else {
                 usleep(10); // 队列为空时休眠
             }

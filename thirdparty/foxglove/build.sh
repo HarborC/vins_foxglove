@@ -3,17 +3,22 @@
 BASE_DIR=$(cd $(dirname $0);pwd)
 cd ${BASE_DIR}
 
-sudo rm -r build
-sudo rm -r ./src/proto/foxglove/*.pb.cc
-sudo rm -r ./src/proto/foxglove/*.pb.h
+sudo rm -rf build
+rm -f ./src/proto/foxglove/*.pb.cc ./src/proto/foxglove/*.pb.h
 
-mkdir build
-cd build
-cmake .. -D Protobuf_PROTOC_EXECUTABLE=/usr/bin/protoc
-make -j2
-sudo make install
+# 生成 Ninja 构建系统
+mkdir -p build && cd build
+cmake -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DProtobuf_PROTOC_EXECUTABLE=/usr/bin/protoc \
+  ..
+
+# 构建（Ninja 自动并行）
+ninja
+
+# 安装
+sudo ninja install
+
+# 回到上级并清理
 cd ..
-
-sudo rm -r build
-sudo rm -r ./src/proto/foxglove/*.pb.cc
-sudo rm -r ./src/proto/foxglove/*.pb.h
+sudo rm -rf build
+rm -f ./src/proto/foxglove/*.pb.cc ./src/proto/foxglove/*.pb.h

@@ -33,7 +33,7 @@ int main(int argc, char **argv) {
   // 初始化 VIO 管理器参数
   VioManagerOptions params;
   params.print_and_load(parser);             // 打印并加载配置参数
-  params.use_multi_threading_subs = true;    // 启用多线程订阅器（提高性能）
+  // params.use_multi_threading_subs = true;    // 启用多线程订阅器（提高性能）
 
   // 创建 VIO 系统实例
   sys = std::make_shared<VioManager>(params);

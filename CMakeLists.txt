@@ -35,7 +35,6 @@ find_package(spdlog REQUIRED)
 find_package(foxglove_lib REQUIRED)
 find_package(ethz_apriltag2 REQUIRED)
 find_package(apriltag REQUIRED)
-find_package(realsense2 REQUIRED)
 
 include_directories(
     ${EIGEN3_INCLUDE_DIR}
@@ -48,7 +47,6 @@ list(APPEND thirdparty_libraries
     ${OpenCV_LIBRARIES}
     ${CERES_LIBRARIES}
     spdlog::spdlog
-    realsense2
 )
 
 add_definitions(-DENABLE_ARUCO_TAGS=1)
