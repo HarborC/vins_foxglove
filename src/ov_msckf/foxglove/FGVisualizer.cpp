@@ -567,8 +567,3 @@ void FGVisualizer::publish_images() {
 
   _viz->showImage("track_images", time_us, img_history_downsampled, "STEREO", true);
 }
-
-void FGVisualizer::show_image(const std::string &topic_nm, const int64_t &usec, const cv::Mat &viz_img, const std::string &parent_frm) {
-  if (!_viz) return;
-  _viz->showImage(topic_nm, usec, viz_img, parent_frm, true);
-}

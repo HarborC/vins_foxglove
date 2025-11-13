@@ -7,13 +7,13 @@ integration: "discrete" # discrete, rk4, analytical (if rk4 or analytical used t
 use_stereo: true # if we have more than 1 camera, if we should try to track stereo constraints between pairs
 max_cameras: 2 # how many cameras we have 1 = mono, 2 = stereo, >2 = binocular (all mono tracking)
 
-calib_cam_extrinsics: false # if the transform between camera and IMU should be optimized R_ItoC, p_CinI
-calib_cam_intrinsics: false # if camera intrinsics should be optimized (focal, center, distortion)
+calib_cam_extrinsics: true # if the transform between camera and IMU should be optimized R_ItoC, p_CinI
+calib_cam_intrinsics: true # if camera intrinsics should be optimized (focal, center, distortion)
 calib_cam_timeoffset: true # if timeoffset between camera and IMU should be optimized
 calib_imu_intrinsics: false # if imu intrinsics should be calibrated (rotation and skew-scale matrix)
 calib_imu_g_sensitivity: false # if gyroscope gravity sensitivity (Tg) should be calibrated
 
-max_clones: 10 # how many clones in the sliding window
+max_clones: 15 # how many clones in the sliding window
 max_slam: 50 # number of features in our state vector
 max_slam_in_update: 25 # update can be split into sequential updates of batches, how many in a batch
 max_msckf_in_update: 40 # how many MSCKF features to use in the update
@@ -89,17 +89,17 @@ filepath_gt: "/tmp/ov_groundtruth.txt"
 # num_opencv_threads: 4 # -1: auto, 0-1: serial, >1: number of threads
 # histogram_method: "HISTOGRAM" # NONE, HISTOGRAM, CLAHE
 
-use_klt: true
-num_pts: 200            # 先拉满观测池
-grid_x: 8
-grid_y: 6
-fast_threshold: 12   # 降门槛增加角点密度
-min_px_dist: 10 # distance between features (features near each other provide less information)
+use_klt: true # if true we will use KLT, otherwise use a ORB descriptor + robust matching
+num_pts: 200 # number of points (per camera) we will extract and try to track
+fast_threshold: 10 # threshold for fast extraction (warning: lower threshs can be expensive)
+grid_x: 5 # extraction sub-grid count for horizontal direction (uniform tracking)
+grid_y: 5 # extraction sub-grid count for vertical direction (uniform tracking)
+min_px_dist: 5 # distance between features (features near each other provide less information)
 knn_ratio: 0.70 # descriptor knn threshold for the top two descriptor matches
-histogram_method: "CLAHE"  # 抗光照/局部对比度差
-track_frequency: 20.0   # 相机30fps时可追到20Hz，减少跨帧位移
-downsample_cameras: false   # 若光照差噪声大可设 true（稳先于清晰）
-num_opencv_threads: 4
+track_frequency: 25.0 # frequency we will perform feature tracking at (in frames per second / hertz)
+downsample_cameras: true # will downsample image in half if true
+num_opencv_threads: 4 # -1: auto, 0-1: serial, >1: number of threads
+histogram_method: "HISTOGRAM" # NONE, HISTOGRAM, CLAHE
 
 # aruco tag tracker for the system
 # DICT_6X6_1000 from https://chev.me/arucogen/
@@ -111,12 +111,12 @@ downsize_aruco: true
 # ==================================================================
 
 # camera noises and chi-squared threshold multipliers
-up_msckf_sigma_px: 2
-up_msckf_chi2_multipler: 2
-up_slam_sigma_px: 2
-up_slam_chi2_multipler: 2
-up_aruco_sigma_px: 2
-up_aruco_chi2_multipler: 2
+up_msckf_sigma_px: 1.5
+up_msckf_chi2_multipler: 1.5
+up_slam_sigma_px: 1.5
+up_slam_chi2_multipler: 1.5
+up_aruco_sigma_px: 1.5
+up_aruco_chi2_multipler: 1.5
 
 # masks for our images
 use_mask: false

@@ -61,10 +61,12 @@ std::shared_ptr<FrameQualityEvaluator> dqe_right;
 void stereoCalibDataGet(const ov_sensors::CameraFrame& image_msg) {
     int64_t time_us = (image_msg.timestamp_raw * 1e6);
 
+    cv::Mat image_combined2;
+    cv::hconcat(image_msg.images[0], image_msg.images[1], image_combined2);
+
     if (task == 3) {
-        cv::Mat image_combined;
-        cv::hconcat(image_msg.images[0], image_msg.images[1], image_combined);
-        viz_->show_image("dete_images", time_us, image_combined, "dete_images");
+        if (viz_->_viz)
+            viz_->_viz->showImage("dete_images", time_us, image_combined2, "dete_images", true);
         thread_update_running = false;
         return;
     }
@@ -104,8 +106,17 @@ void stereoCalibDataGet(const ov_sensors::CameraFrame& image_msg) {
         image_num++;
     }
 
+    
     cv::Mat image_combined;
     cv::hconcat(dqe_left->global_coverage_.viz_mat, dqe_right->global_coverage_.viz_mat, image_combined);
+
+    if (image_combined2.channels() != image_combined.channels()) {
+        cv::cvtColor(image_combined2, image_combined2, cv::COLOR_GRAY2BGR);
+    }
+
+    // 叠加 image_combined 和 image_combined2
+    cv::addWeighted(image_combined, 0.7, image_combined2, 0.3, 0.0, image_combined); 
+
     // 图像中间用一条线分割
     cv::line(image_combined, cv::Point(image_combined.cols / 2, 0), cv::Point(image_combined.cols / 2, image_combined.rows), cv::Scalar(255, 255, 255), 2);
     // 图片下方黑框显示各种状态
@@ -116,7 +127,8 @@ void stereoCalibDataGet(const ov_sensors::CameraFrame& image_msg) {
     ss << "Image Num: " << image_num << " " << " | Left Coverage Ratio: " << dqe_left->calcCoverageRatio() << " " << " | Right Coverage Ratio: " << dqe_right->calcCoverageRatio();
     cv::putText(status_image, ss.str(), cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX, 1, cv::Scalar(255, 255, 255), 2);
     cv::vconcat(image_combined, status_image, image_combined);
-    viz_->show_image("dete_images", time_us, image_combined, "dete_images");
+    if (viz_->_viz)
+        viz_->_viz->showImage("dete_images", time_us, image_combined, "dete_images", true);
 
     thread_update_running = false;
 }

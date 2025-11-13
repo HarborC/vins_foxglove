@@ -18,7 +18,18 @@ PoseEstimation::PoseEstimation(std::shared_ptr<VioManager> app) : _app(app) {
     detector_ = std::make_shared<CAMERA_CALIB::ApriltagDetector>(numTags);
 }
 
-bool PoseEstimation::feed(const double& timestamp, const std::vector<cv::Mat> images) {
+std::vector<std::vector<float>> PoseEstimation::getAprilGridPCD() {
+    std::vector<std::vector<float>> pcd;
+    for (const auto& corner_pos : april_grid_->aprilgrid_corner_pos_3d) {
+        std::vector<float> point = {static_cast<float>(corner_pos(0)),
+                                    static_cast<float>(corner_pos(1)),
+                                    static_cast<float>(corner_pos(2))};
+        pcd.push_back(point);
+    }
+    return pcd;
+}
+
+bool PoseEstimation::feed(const double& timestamp, const std::vector<cv::Mat> images, Eigen::Matrix4f &T_imu_to_grid_f) {
     // 基本防御性检查
     if (images.size() < 2) {
       PRINT_DEBUG("[APRIL_GRID] invalid images vector size=%zu\n", images.size());
@@ -155,7 +166,7 @@ bool PoseEstimation::feed(const double& timestamp, const std::vector<cv::Mat> im
     Eigen::Matrix4d T_imu_to_grid = Eigen::Matrix4d::Identity();
     T_imu_to_grid.block(0,0,3,3) = T_grid_to_imu.block(0,0,3,3).transpose();
     T_imu_to_grid.block(0,3,3,1) = -T_imu_to_grid.block(0,0,3,3) * T_grid_to_imu.block(0,3,3,1);
-    Eigen::Matrix4f T_imu_to_grid_f = T_imu_to_grid.cast<float>();
+    T_imu_to_grid_f = T_imu_to_grid.cast<float>();
     return true;
 }
 
@@ -289,7 +300,7 @@ bool PoseEstimation::optimizeIMUPoseWithCeres(const std::vector<Eigen::Vector2d>
   ceres::Solver::Options options;
   options.linear_solver_type = ceres::DENSE_NORMAL_CHOLESKY;
   options.minimizer_progress_to_stdout = false;
-  options.max_num_iterations = 10;
+  options.max_num_iterations = 50;
   options.num_threads = 2;
 
   // 求解

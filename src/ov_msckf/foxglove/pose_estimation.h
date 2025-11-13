@@ -1,4 +1,12 @@
 #pragma once
+
+#include <vector>
+#include <string>
+#include <memory>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+
 #include "calibration/aprilgrid.h"
 #include "calibration/apriltags.h"
 
@@ -18,7 +26,8 @@ public:
     PoseEstimation(std::shared_ptr<VioManager> app);
     ~PoseEstimation() {}
 
-    bool feed(const double& timestamp, const std::vector<cv::Mat> images);
+    bool feed(const double& timestamp, const std::vector<cv::Mat> images, Eigen::Matrix4f &T_imu_to_grid_f);
+    std::vector<std::vector<float>> getAprilGridPCD();
 private:
     std::shared_ptr<VioManager> _app;
     std::shared_ptr<CAMERA_CALIB::AprilGrid> april_grid_;

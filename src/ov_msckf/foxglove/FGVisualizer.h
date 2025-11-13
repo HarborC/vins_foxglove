@@ -77,8 +77,6 @@ public:
   // 发布相机的位姿、内参矩阵等
   void publish_cameras();
 
-  void show_image(const std::string &topic_nm, const int64_t &usec, const cv::Mat &viz_img, const std::string &parent_frm);
-
   // 发布IMU等
   void publish_raw_imu(const ov_core::ImuData& s);
 
