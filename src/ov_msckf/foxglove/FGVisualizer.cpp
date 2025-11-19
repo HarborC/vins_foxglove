@@ -203,6 +203,69 @@ void FGVisualizer::startCore() {
           publish_cameras();
           visualize();
           auto t2 = boost::posix_time::microsec_clock::local_time();
+
+          // ====== 计算特征统计并进行预警判定 ======
+          {
+            std::map<int,int> per_cam_counts; int total_cnt = 0;
+            _app->get_last_feature_counts(per_cam_counts, total_cnt);
+            last_feat_counts_ = per_cam_counts;
+
+            // 更新连续帧计数
+            // 全局：特征不足
+            if ((int)per_cam_counts.size() <= 1) {
+              // 单目：使用 per-cam 阈值
+              int c = per_cam_counts.empty() ? 0 : per_cam_counts.begin()->second;
+              if (c < warn_min_feat_per_cam_) consec_low_total_++; else consec_low_total_ = 0;
+            } else {
+              // 双目：使用总阈值
+              if (total_cnt < warn_min_feat_total_) consec_low_total_++; else consec_low_total_ = 0;
+            }
+
+            // 分相机：遮挡（某一路极低）
+            for (const auto &kv : per_cam_counts) {
+              int cam_id = kv.first; int c = kv.second;
+              int &cc = consec_low_cam_[cam_id];
+              if (c < warn_min_feat_per_cam_) cc++; else cc = 0;
+            }
+
+            // 生成告警标志
+            bool low_feat = (consec_low_total_ >= warn_consec_frames_);
+            bool occ_any = false; std::string occ_detail;
+            for (const auto &kv : per_cam_counts) {
+              int cam_id = kv.first; int cc = consec_low_cam_[cam_id];
+              if (cc >= warn_consec_frames_) {
+                occ_any = true;
+                if (!occ_detail.empty()) occ_detail += ",";
+                occ_detail += ("CAM" + std::to_string(cam_id));
+              }
+            }
+
+            // 状态去抖动后的结果
+            warn_low_features_active_ = low_feat;
+            warn_occlusion_active_ = occ_any;
+            warn_occlusion_detail_ = occ_detail;
+
+            // 输出到仪表盘与日志
+            // 基本统计
+            _dash_board->setNameAndValue(4, "FEAT_TOTAL", (double)total_cnt);
+            // 展示前两个相机的计数（若存在）
+            double cam0c = per_cam_counts.count(0) ? per_cam_counts[0] : -1;
+            double cam1c = per_cam_counts.count(1) ? per_cam_counts[1] : -1;
+            _dash_board->setNameAndValue(5, "FEAT_CAM0", cam0c);
+            _dash_board->setNameAndValue(6, "FEAT_CAM1", cam1c);
+
+            // 告警量化显示（1=告警，0=正常）
+            _dash_board->setNameAndValue(7, "WARN_LOW_FEATURES", warn_low_features_active_ ? 1.0 : 0.0);
+            _dash_board->setNameAndValue(8, "WARN_OCCLUSION", warn_occlusion_active_ ? 1.0 : 0.0);
+
+            if (warn_low_features_active_) {
+              PRINT_WARNING(YELLOW "[WARN] 特征不足：total=%d (cam0=%d, cam1=%d)\n" RESET,
+                            total_cnt, (int)cam0c, (int)cam1c);
+            }
+            if (warn_occlusion_active_) {
+              PRINT_WARNING(RED "[WARN] 遮挡预警：%s\n" RESET, warn_occlusion_detail_.c_str());
+            }
+          }
           
           double time_slam = (t1 - t0).total_microseconds() * 1e-6;
           double time_total = (t2 - t0).total_microseconds() * 1e-6;
@@ -464,6 +527,17 @@ void FGVisualizer::publish_state() {
   }
 
   _viz->showPath("path_imu_win10", time_us, path_imu, "LOCAL_WORLD");
+
+  auto velocity = state->_imu->vel().cast<float>();
+  auto bias_g = state->_imu->bias_g().cast<float>();
+  auto bias_a = state->_imu->bias_a().cast<float>();
+  PRINT_INFO("Publishing IMU State at time %.6f: pos(%.3f,%.3f,%.3f) vel(%.3f,%.3f,%.3f) bias_a(%.5f,%.5f,%.5f) bias_g(%.5f,%.5f,%.5f)\n",
+             timestamp_inI,
+             t_IinM.x(), t_IinM.y(), t_IinM.z(),
+             velocity.x(), velocity.y(), velocity.z(),
+             bias_a.x(), bias_a.y(), bias_a.z(),
+             bias_g.x(), bias_g.y(), bias_g.z());
+  _viz->publishIMUState("StateIMU", time_us, "IMU", poseIinM_f, velocity, bias_a, bias_g);
 }
 
 void FGVisualizer::publish_features() {

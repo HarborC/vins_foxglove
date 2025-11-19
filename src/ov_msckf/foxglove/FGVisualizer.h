@@ -162,6 +162,22 @@ public:
 
   // 启动 / 停止 姿态发送线程
   void startPoseThread();
+
+  // ====== 特征/遮挡预警相关（简单统计与去抖动） ======
+  // 阈值设置（可根据项目需要调整）
+  int warn_min_feat_per_cam_ = 35;    // 单目特征过低阈值
+  int warn_min_feat_total_   = 35;    // 双目总特征过低阈值
+  int warn_consec_frames_    = 3;     // 连续帧计数触发阈值
+
+  // 运行时统计
+  std::map<int,int> last_feat_counts_;
+  int consec_low_total_ = 0;
+  std::map<int,int> consec_low_cam_;  // key: cam id, value: 连续低于阈值的帧数
+
+  // 当前状态标志
+  bool warn_low_features_active_ = false;
+  bool warn_occlusion_active_    = false;
+  std::string warn_occlusion_detail_;
 };
 
 } // namespace ov_msckf

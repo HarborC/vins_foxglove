@@ -163,6 +163,19 @@ VioManager::VioManager(VioManagerOptions &params_) : thread_init_running(false),
   }
 }
 
+void VioManager::get_last_feature_counts(std::map<int,int> &per_cam_counts, int &total_count) {
+  per_cam_counts.clear();
+  total_count = 0;
+  if (!trackFEATS) return;
+  auto last_obs = trackFEATS->get_last_obs();
+  for (const auto &kv : last_obs) {
+    int cam_id = static_cast<int>(kv.first);
+    int cnt = static_cast<int>(kv.second.size());
+    per_cam_counts[cam_id] = cnt;
+    total_count += cnt;
+  }
+}
+
 void VioManager::feed_measurement_imu(const ov_core::ImuData &message) {
 
   // The oldest time we need IMU with is the last clone

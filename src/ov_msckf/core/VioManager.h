@@ -136,6 +136,10 @@ public:
     feat_tracks_uvd = active_tracks_uvd;
   }
 
+  /// Returns the number of active features per camera in the last processed frame
+  /// This queries the frontend tracker and summarizes counts by camera id.
+  void get_last_feature_counts(std::map<int,int> &per_cam_counts, int &total_count);
+
 protected:
   /**
    * @brief Given a new set of camera images, this will track them.
